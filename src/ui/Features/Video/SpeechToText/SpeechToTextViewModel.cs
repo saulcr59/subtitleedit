@@ -1077,6 +1077,13 @@ public partial class SpeechToTextViewModel : ObservableObject
             const int maxLineChars = 20;
             const int maxSubtitleChars = 40;
 
+            // Stay inside the configured display maximum with a margin: exceeding it
+            // makes SpeechToTextTimingFixer push the subtitle's *start* forward, which
+            // leaves the speaker talking with nothing on screen.
+            var maxSubtitleSeconds = Math.Max(
+                2.0,
+                Configuration.Settings.General.SubtitleMaximumDisplayMilliseconds / 1000.0 - 1.0);
+
             static bool IsTerminal(string w) =>
                 w.Contains('。') || w.Contains('？') || w.Contains('！') ||
                 w.Contains('.') || w.Contains('?') || w.Contains('!') || w.Contains('\n');
@@ -1139,9 +1146,13 @@ public partial class SpeechToTextViewModel : ObservableObject
                     {
                         score += 3;
                     }
-                    else if ("はがをと".IndexOf(c) >= 0)
+                    else if ("はがを".IndexOf(c) >= 0)
                     {
-                        score += 2; // unambiguous case particles
+                        // Case particles that are rarely anything else. と is
+                        // deliberately absent: it is also the quotative in という,
+                        // so rewarding it splits that phrase. Where と genuinely
+                        // joins two nouns, the script change below scores it anyway.
+                        score += 2;
                     }
                 }
 
@@ -1149,7 +1160,10 @@ public partial class SpeechToTextViewModel : ObservableObject
                 {
                     var a = ScriptOf(prev[prev.Length - 1]);
                     var b = ScriptOf(next[0]);
-                    if (a != 0 && b != 0 && a != b)
+                    // Only a move *into* kanji, katakana or Latin marks a new content
+                    // word. The reverse - kanji followed by hiragana - is usually
+                    // inflection continuing the same word (衰退 + している).
+                    if (a != 0 && b != a && (b == 2 || b == 3 || b == 4))
                     {
                         score += 2;
                     }
@@ -1177,6 +1191,11 @@ public partial class SpeechToTextViewModel : ObservableObject
                     prefix[k + 1] = prefix[k] + tokens[group[k]].Text.Length;
                 }
 
+                // Bound how far a good boundary may pull the break away from the
+                // ideal length, or a strong score drags it to the very start and
+                // leaves a three-character line facing an eighteen-character one.
+                var maxDetour = Math.Max(4, prefix[group.Count] / 4);
+
                 var best = -1;
                 var bestAdjusted = int.MaxValue;
                 for (var k = 1; k < group.Count; k++)
@@ -1186,11 +1205,13 @@ public partial class SpeechToTextViewModel : ObservableObject
                         continue;
                     }
 
-                    // A good boundary is worth a detour from the ideal length, but
-                    // a bounded one - hence scoring against distance rather than
-                    // overriding it.
-                    var adjusted = Math.Abs(prefix[k] - targetChars)
-                                   - BreakScore(tokens[group[k - 1]].Text, tokens[group[k]].Text) * 3;
+                    var distance = Math.Abs(prefix[k] - targetChars);
+                    if (distance > maxDetour)
+                    {
+                        continue;
+                    }
+
+                    var adjusted = distance - BreakScore(tokens[group[k - 1]].Text, tokens[group[k]].Text) * 3;
                     if (adjusted < bestAdjusted)
                     {
                         bestAdjusted = adjusted;
@@ -1198,7 +1219,25 @@ public partial class SpeechToTextViewModel : ObservableObject
                     }
                 }
 
-                return best > 0 ? best : Math.Max(1, group.Count / 2);
+                if (best > 0)
+                {
+                    return best;
+                }
+
+                // Nothing legal within the detour: take the closest legal position.
+                for (var d = 0; d < group.Count; d++)
+                {
+                    foreach (var k in new[] { group.Count / 2 - d, group.Count / 2 + d })
+                    {
+                        if (k >= 1 && k < group.Count &&
+                            CanBreakBetween(tokens[group[k - 1]].Text, tokens[group[k]].Text))
+                        {
+                            return k;
+                        }
+                    }
+                }
+
+                return Math.Max(1, group.Count / 2);
             }
 
             // Latin runs keep their spaces between tokens; CJK must not get any,
@@ -1262,7 +1301,14 @@ public partial class SpeechToTextViewModel : ObservableObject
             foreach (var sentence in sentences)
             {
                 var totalChars = sentence.Sum(k => tokens[k].Text.Length);
-                var pieceCount = Math.Max(1, (int)Math.Ceiling(totalChars / (double)maxSubtitleChars));
+                var seconds = tokens[sentence[sentence.Count - 1]].End - tokens[sentence[0]].Start;
+
+                // Split on length or on duration, whichever demands more pieces -
+                // but never more than the text can fill, so a short sentence held
+                // open by trailing silence is not shredded into syllables.
+                var byChars = (int)Math.Ceiling(totalChars / (double)maxSubtitleChars);
+                var byTime = (int)Math.Ceiling(seconds / maxSubtitleSeconds);
+                var pieceCount = Math.Clamp(Math.Max(byChars, byTime), 1, Math.Max(1, totalChars / 10));
 
                 var pieces = new List<List<int>>();
                 var rest = sentence;
@@ -1292,10 +1338,14 @@ public partial class SpeechToTextViewModel : ObservableObject
                         }
                     }
 
-                    subtitle.Paragraphs.Add(new Paragraph(
-                        text,
-                        tokens[piece[0]].Start * 1000.0,
-                        piece.Max(k => tokens[k].End) * 1000.0));
+                    // CTC hands trailing silence to the character before it, which is
+                    // what keeps a short line on screen instead of flashing past.
+                    // Trim that tail rather than let it breach the display maximum,
+                    // because the fixer enforces the maximum by moving the start.
+                    var start = tokens[piece[0]].Start;
+                    var end = Math.Min(piece.Max(k => tokens[k].End), start + maxSubtitleSeconds);
+
+                    subtitle.Paragraphs.Add(new Paragraph(text, start * 1000.0, end * 1000.0));
                 }
             }
 
