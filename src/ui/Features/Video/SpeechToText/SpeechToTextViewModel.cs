@@ -1024,47 +1024,153 @@ public partial class SpeechToTextViewModel : ObservableObject
             var words = jsonDoc.RootElement.GetProperty("words");
 
             var subtitle = new Subtitle();
-            var currentText = new StringBuilder();
-            var startTime = 0.0;
-            var endTime = 0.0;
-            var first = true;
 
-            foreach (var word in words.EnumerateArray())
+            // Ported from qwen3-asr.cpp's own alignment_to_srt(): break on terminal
+            // punctuation first, and only fall back to a raw silence gap or a hard
+            // length cap when there's no punctuation to anchor on. The previous version
+            // here only looked at gaps/length (never punctuation), which routinely left
+            // a trailing "。" orphaned at the start of the next line, or glued several
+            // unrelated sentences into one block whenever they weren't separated by a
+            // long enough pause (issue: subtitle lines starting with "." that should
+            // have closed the previous sentence instead).
+            static bool EndsClause(string s)
             {
-                var text = word.GetProperty("word").GetString() ?? string.Empty;
-                var start = word.GetProperty("start").GetDouble();
-                var end = word.GetProperty("end").GetDouble();
-
-                if (first)
+                if (s.Length == 0)
                 {
-                    startTime = start;
-                    first = false;
+                    return false;
                 }
 
-                var newParagraph = false;
-                if (currentText.Length > 0 && (start - endTime > 0.5 || currentText.Length + text.Length > 80))
-                {
-                    newParagraph = true;
-                }
-
-                if (newParagraph)
-                {
-                    subtitle.Paragraphs.Add(new Paragraph(currentText.ToString().Trim(), startTime * 1000.0, endTime * 1000.0));
-                    currentText.Clear();
-                    startTime = start;
-                }
-
-                if (currentText.Length > 0)
-                {
-                    currentText.Append(' ');
-                }
-
-                currentText.Append(text);
-                endTime = end;
+                return s[s.Length - 1] is ',' or '.' or '?' or '!' or '、' or '，' or '。';
             }
 
-            if (currentText.Length > 0)
+            static bool IsTerminalPunctuation(string word)
             {
+                return word.Contains('。') || word.Contains('？') || word.Contains('！') ||
+                       word.Contains('.') || word.Contains('?') || word.Contains('!') ||
+                       word.Contains('\n');
+            }
+
+            // A word made up entirely of punctuation carries no meaning on its own line -
+            // it only makes sense glued to whichever sentence it closes. Used to fold a
+            // stray "。" (etc.) that got orphaned by a pause back onto the previous line
+            // instead of letting it become its own one-character subtitle.
+            static bool IsPurePunctuation(string word)
+            {
+                if (string.IsNullOrEmpty(word))
+                {
+                    return false;
+                }
+
+                foreach (var c in word)
+                {
+                    if (c is not ('。' or '？' or '！' or '.' or '?' or '!' or '、' or ',' or '\n'))
+                    {
+                        return false;
+                    }
+                }
+
+                return true;
+            }
+
+            var wordList = words.EnumerateArray().ToList();
+            var i = 0;
+            while (i < wordList.Count)
+            {
+                var currentText = new StringBuilder();
+                var startTime = wordList[i].GetProperty("start").GetDouble();
+                var endTime = wordList[i].GetProperty("end").GetDouble();
+                var wordCount = 0;
+
+                while (i < wordList.Count)
+                {
+                    var word = wordList[i];
+                    var text = word.GetProperty("word").GetString() ?? string.Empty;
+                    var start = word.GetProperty("start").GetDouble();
+                    var end = word.GetProperty("end").GetDouble();
+
+                    var pause = start - endTime;
+                    if (wordCount > 0 && (pause > 3.0 || (pause > 1.5 && EndsClause(currentText.ToString()))))
+                    {
+                        break;
+                    }
+
+                    // Only insert a space between two Latin-script tokens - CJK text has no
+                    // spaces between words, so adding one after every single character (as a
+                    // prior version of this code did unconditionally) produced garbled output
+                    // like "ど う も よ み や で す".
+                    if (currentText.Length > 0 && text.Length > 0 &&
+                        currentText[currentText.Length - 1] < 128 && text[0] < 128 &&
+                        !IsPurePunctuation(text[0].ToString()))
+                    {
+                        currentText.Append(' ');
+                    }
+
+                    currentText.Append(text);
+                    if (end > endTime)
+                    {
+                        endTime = end;
+                    }
+                    wordCount++;
+                    i++;
+
+                    if (IsTerminalPunctuation(text))
+                    {
+                        break;
+                    }
+
+                    if (wordCount >= 20 || currentText.Length >= 80)
+                    {
+                        // Don't cut a couple of characters short of a real sentence end: if
+                        // terminal punctuation is reachable within a few more words with no
+                        // real pause in between, keep going instead of hard-cutting here -
+                        // the IsTerminalPunctuation check above will close the line there.
+                        var extending = false;
+                        var lookaheadEnd = endTime;
+                        for (var j = i; j < Math.Min(i + 5, wordList.Count); j++)
+                        {
+                            var la = wordList[j];
+                            var laText = la.GetProperty("word").GetString() ?? string.Empty;
+                            var laStart = la.GetProperty("start").GetDouble();
+                            if (laStart - lookaheadEnd > 1.0)
+                            {
+                                break;
+                            }
+
+                            lookaheadEnd = la.GetProperty("end").GetDouble();
+                            if (IsTerminalPunctuation(laText))
+                            {
+                                extending = true;
+                                break;
+                            }
+                        }
+
+                        if (!extending)
+                        {
+                            break;
+                        }
+                    }
+                }
+
+                // Fold any immediately-following punctuation-only word(s) into the line
+                // that just closed, rather than letting a lone "。" start the next one.
+                while (i < wordList.Count && currentText.Length > 0)
+                {
+                    var trailing = wordList[i].GetProperty("word").GetString() ?? string.Empty;
+                    if (!IsPurePunctuation(trailing))
+                    {
+                        break;
+                    }
+
+                    currentText.Append(trailing);
+                    var trailingEnd = wordList[i].GetProperty("end").GetDouble();
+                    if (trailingEnd > endTime)
+                    {
+                        endTime = trailingEnd;
+                    }
+
+                    i++;
+                }
+
                 subtitle.Paragraphs.Add(new Paragraph(currentText.ToString().Trim(), startTime * 1000.0, endTime * 1000.0));
             }
 
@@ -3806,10 +3912,11 @@ public partial class SpeechToTextViewModel : ObservableObject
             _qwen3AsrOutputJsonPath = Path.Combine(Path.GetTempPath(), $"qwen3_asr_{Guid.NewGuid():N}.json");
             _qwen3AsrExitCode = null;
             var qwen3ExtraArgs = engine.CommandLineParameter;
+            var qwen3VadArg = qwen3Asr.IsVadModelInstalled() ? $" --vad-model \"{qwen3Asr.GetVadModelPath()}\"" : string.Empty;
 
             var qwen3Params = string.IsNullOrWhiteSpace(qwen3ExtraArgs)
-                ? $"-m \"{qwen3Asr.GetModelForCmdLine(model)}\" --aligner-model \"{qwen3Asr.GetModelForCmdLine(alignerModel.Name)}\" -f \"{waveFileName}\" --transcribe-align -o \"{_qwen3AsrOutputJsonPath}\""
-                : $"{qwen3ExtraArgs} -m \"{qwen3Asr.GetModelForCmdLine(model)}\" --aligner-model \"{qwen3Asr.GetModelForCmdLine(alignerModel.Name)}\" -f \"{waveFileName}\" --transcribe-align -o \"{_qwen3AsrOutputJsonPath}\"";
+                ? $"-m \"{qwen3Asr.GetModelForCmdLine(model)}\" --aligner-model \"{qwen3Asr.GetModelForCmdLine(alignerModel.Name)}\"{qwen3VadArg} -f \"{waveFileName}\" --transcribe-align -o \"{_qwen3AsrOutputJsonPath}\""
+                : $"{qwen3ExtraArgs} -m \"{qwen3Asr.GetModelForCmdLine(model)}\" --aligner-model \"{qwen3Asr.GetModelForCmdLine(alignerModel.Name)}\"{qwen3VadArg} -f \"{waveFileName}\" --transcribe-align -o \"{_qwen3AsrOutputJsonPath}\"";
 
             var p = new Process
             {

@@ -110,6 +110,19 @@ public class Qwen3AsrCppEngine : ISpeechToTextEngine
         Urls = ["https://huggingface.co/OpenVoiceOS/qwen3-forced-aligner-0.6b-q4-k-m/resolve/main/qwen3-forced-aligner-0.6b-q4_k_m.gguf"],
     };
 
+    // Tiny (~1MB) ggml Silero VAD model. When present, qwen3-asr-cli is told to split
+    // long audio at detected silence instead of fixed 30s/2s-overlap windows, which
+    // avoids cutting through a word/sentence at a chunk boundary (issue: duplicated
+    // characters and bogus timestamp jumps right at the seam, e.g. "設" emitted twice
+    // and "す"/"。" landing several hundred ms late in "...設定できます。"). Optional:
+    // if the file isn't there, the CLI silently falls back to its old fixed chunking.
+    public string GetVadModelPath()
+    {
+        return Path.Combine(GetAndCreateWhisperFolder(), "vad", "silero-vad-v5.1.2.bin");
+    }
+
+    public bool IsVadModelInstalled() => File.Exists(GetVadModelPath());
+
     public string Extension => string.Empty;
     public string UnpackSkipFolder => string.Empty;
 

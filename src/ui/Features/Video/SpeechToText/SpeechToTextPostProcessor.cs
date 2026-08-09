@@ -275,12 +275,17 @@ namespace Nikse.SubtitleEdit.Features.Video.SpeechToText
             const int maxMillisecondsBetweenLines = 100;
             const bool onlyContinuousLines = true;
 
-            if (language == "jp")
+            // "ja"/"zh" are the ISO 639-1 codes actually handed in by engines like
+            // Qwen3AsrCppEngine (see its Languages list); "jp"/"cn" alone never matched,
+            // so this cap silently fell back to the much larger generic ParagraphMaxChars
+            // default and let CJK lines get merged far past the intended limit (issue:
+            // several unrelated sentences fused into one long block).
+            if (language == "jp" || language == "ja")
             {
                 ParagraphMaxChars = AudioToTextLineMaxCharsJp;
             }
 
-            if (language == "cn" || language == "yue")
+            if (language == "cn" || language == "zh" || language == "yue")
             {
                 ParagraphMaxChars = AudioToTextLineMaxCharsCn;
             }
