@@ -459,29 +459,42 @@ public partial class SpeechToTextViewModel : ObservableObject
         UpdateCrispAsrBackendUi();
         UpdateForcedAlignerUi();
         IsBackendSelectionVisible = IsWhisperCppSelected || IsCrispAsrSelected;
-        IsForcedAlignerVisible = IsCrispAsrSelected;
+        IsForcedAlignerVisible = IsCrispAsrSelected || GetEffectiveSelectedEngine() is Qwen3AsrCppEngine;
     }
 
     private void UpdateForcedAlignerUi()
     {
         var engine = GetEffectiveSelectedEngine();
         var crispEngine = engine as ICrispAsrEngine;
+        var qwen3AsrCpp = engine as Qwen3AsrCppEngine;
         var hasNative = crispEngine?.HasNativeTimestamps == true;
 
         var newOptions = new List<ForcedAlignerOption>();
-        if (hasNative)
+        if (qwen3AsrCpp != null)
         {
+            // qwen3-asr-cli always ships its own Qwen3 aligner, so "built-in" here
+            // means that one. The Canary/Qwen3 entries below are Crisp ASR model
+            // formats it cannot load, so they are left out; the wav2vec2 GGUFs are
+            // plain wav2vec2 CTC and load fine via --ctc-align-model.
             newOptions.Add(ForcedAlignerOption.BuiltIn());
+            newOptions.AddRange(ForcedAlignerOption.Wav2Vec2All());
         }
-        newOptions.Add(ForcedAlignerOption.CanaryCtc());
-        newOptions.Add(ForcedAlignerOption.Qwen3());
-        // wav2vec2 "WhisperX aligner zoo" — 12 language-specific CTC aligners
-        // that work on top of any Crisp ASR backend via `-am <path>`.
-        newOptions.AddRange(ForcedAlignerOption.Wav2Vec2All());
+        else
+        {
+            if (hasNative)
+            {
+                newOptions.Add(ForcedAlignerOption.BuiltIn());
+            }
+            newOptions.Add(ForcedAlignerOption.CanaryCtc());
+            newOptions.Add(ForcedAlignerOption.Qwen3());
+            // wav2vec2 "WhisperX aligner zoo" — 12 language-specific CTC aligners
+            // that work on top of any Crisp ASR backend via `-am <path>`.
+            newOptions.AddRange(ForcedAlignerOption.Wav2Vec2All());
+        }
 
         foreach (var opt in newOptions)
         {
-            opt.IsInstalled = IsAlignerInstalled(opt, crispEngine);
+            opt.IsInstalled = IsAlignerInstalled(opt, crispEngine, qwen3AsrCpp);
             opt.Display = opt.BaseDisplay;
         }
 
@@ -489,6 +502,20 @@ public partial class SpeechToTextViewModel : ObservableObject
         foreach (var opt in newOptions)
         {
             ForcedAligners.Add(opt);
+        }
+
+        if (qwen3AsrCpp != null)
+        {
+            // Keep whatever was persisted if it is offered here, otherwise fall back
+            // to the bundled aligner rather than silently picking a language-specific
+            // model that may not match the audio.
+            var saved = ForcedAligners.FirstOrDefault(p => p.Choice == Se.Settings.Tools.AudioToText.CrispAsrForcedAligner)
+                        ?? ForcedAligners.First();
+            if (!ReferenceEquals(SelectedForcedAligner, saved))
+            {
+                SelectedForcedAligner = saved;
+            }
+            return;
         }
 
         if (crispEngine == null)
@@ -513,14 +540,27 @@ public partial class SpeechToTextViewModel : ObservableObject
     // Whether the aligner GGUF is already on disk for the given engine. A partial/aborted
     // download leaves a tiny stub behind, so require a plausible model size (> 10 MB) before
     // treating it as installed.
-    private static bool IsAlignerInstalled(ForcedAlignerOption option, ICrispAsrEngine? crispEngine)
+    private static bool IsAlignerInstalled(ForcedAlignerOption option, ICrispAsrEngine? crispEngine, Qwen3AsrCppEngine? qwen3AsrCpp = null)
     {
-        if (option.IsBuiltIn || string.IsNullOrEmpty(option.FileName) || crispEngine is not CrispAsrEngineBase baseEngine)
+        if (option.IsBuiltIn || string.IsNullOrEmpty(option.FileName))
         {
             return false;
         }
 
-        var path = baseEngine.GetModelForCmdLine(option.FileName);
+        string path;
+        if (qwen3AsrCpp != null)
+        {
+            path = qwen3AsrCpp.GetModelForCmdLine(option.FileName);
+        }
+        else if (crispEngine is CrispAsrEngineBase baseEngine)
+        {
+            path = baseEngine.GetModelForCmdLine(option.FileName);
+        }
+        else
+        {
+            return false;
+        }
+
         return File.Exists(path) && new FileInfo(path).Length > 10_000_000;
     }
 
@@ -1023,155 +1063,240 @@ public partial class SpeechToTextViewModel : ObservableObject
             var jsonDoc = JsonDocument.Parse(jsonText);
             var words = jsonDoc.RootElement.GetProperty("words");
 
+            // The engine emits one token per character for CJK, so the subtitle
+            // lines have to be rebuilt here. Two stages: gather whole sentences,
+            // then decide how each one is presented.
+            //
+            // A sentence is only ever split *in time* when it is too long to read
+            // as two lines - otherwise it stays one subtitle and is merely wrapped,
+            // which is what stops a sentence from appearing cut in half. Where a
+            // break is needed it is chosen by score rather than by "wherever the
+            // character count ran out", because Japanese has no spaces and an
+            // arbitrary cut lands inside words (ディスプレイ severed into ディ +
+            // スプレイ, 必要 into 必 + 要).
+            const int maxLineChars = 20;
+            const int maxSubtitleChars = 40;
+
+            static bool IsTerminal(string w) =>
+                w.Contains('。') || w.Contains('？') || w.Contains('！') ||
+                w.Contains('.') || w.Contains('?') || w.Contains('!') || w.Contains('\n');
+
+            static bool IsPurePunctuation(string w) =>
+                !string.IsNullOrEmpty(w) && w.All(c => "。？！.?!、,\n".IndexOf(c) >= 0);
+
+            static bool EndsClause(string s) =>
+                s.Length > 0 && ",.?!、，。".IndexOf(s[s.Length - 1]) >= 0;
+
+            static bool IsKatakana(char c) => (c >= '゠' && c <= 'ヿ') || (c >= 'ｦ' && c <= 'ﾟ');
+
+            // Kinsoku shori: characters that may not open or close a line.
+            static bool CannotStartLine(char c) =>
+                "ぁぃぅぇぉっゃゅょゎァィゥェォッャュョヮーｰ、。，．・？！)）]］}｝」』".IndexOf(c) >= 0;
+
+            static bool CannotEndLine(char c) => "(（[［{｛「『".IndexOf(c) >= 0;
+
+            static bool CanBreakBetween(string prev, string next)
+            {
+                if (prev.Length == 0 || next.Length == 0)
+                {
+                    return true;
+                }
+
+                var a = prev[prev.Length - 1];
+                var b = next[0];
+                if (CannotStartLine(b) || CannotEndLine(a))
+                {
+                    return false;
+                }
+
+                if (IsKatakana(a) && IsKatakana(b))
+                {
+                    return false; // a katakana run is one loanword
+                }
+
+                return !(a < 128 && b < 128 && char.IsLetterOrDigit(a) && char.IsLetterOrDigit(b));
+            }
+
+            // A change of script is the strongest word-boundary signal Japanese
+            // offers without a dictionary. Staying within one script says nothing:
+            // 必要 and 解像度 are single words written wholly in kanji, so treating
+            // "next character is kanji" as a word start cuts straight through them.
+            static int ScriptOf(char c)
+            {
+                if (c >= 'ぁ' && c <= 'ゟ') return 1;
+                if (IsKatakana(c)) return 2;
+                if ((c >= '一' && c <= '鿿') || (c >= '㐀' && c <= '䶿')) return 3;
+                return c < 128 && char.IsLetterOrDigit(c) ? 4 : 0;
+            }
+
+            static int BreakScore(string prev, string next)
+            {
+                var score = 0;
+                if (prev.Length > 0)
+                {
+                    var c = prev[prev.Length - 1];
+                    if (c == '、' || c == '，')
+                    {
+                        score += 3;
+                    }
+                    else if ("はがをと".IndexOf(c) >= 0)
+                    {
+                        score += 2; // unambiguous case particles
+                    }
+                }
+
+                if (prev.Length > 0 && next.Length > 0)
+                {
+                    var a = ScriptOf(prev[prev.Length - 1]);
+                    var b = ScriptOf(next[0]);
+                    if (a != 0 && b != 0 && a != b)
+                    {
+                        score += 2;
+                    }
+                }
+
+                return score;
+            }
+
+            var tokens = words.EnumerateArray()
+                .Select(w => (Text: w.GetProperty("word").GetString() ?? string.Empty,
+                              Start: w.GetProperty("start").GetDouble(),
+                              End: w.GetProperty("end").GetDouble()))
+                .ToList();
+
+            // Break at the legal position closest to `targetChars`, preferring a
+            // comma, a case particle or a script change. Searching around the
+            // target instead of cutting at the limit is what keeps the halves
+            // balanced - cutting at the limit turns a 33-character sentence into
+            // 32 + 1 and orphans a syllable.
+            int ChooseBreak(List<int> group, int targetChars)
+            {
+                var prefix = new int[group.Count + 1];
+                for (var k = 0; k < group.Count; k++)
+                {
+                    prefix[k + 1] = prefix[k] + tokens[group[k]].Text.Length;
+                }
+
+                var best = -1;
+                var bestAdjusted = int.MaxValue;
+                for (var k = 1; k < group.Count; k++)
+                {
+                    if (!CanBreakBetween(tokens[group[k - 1]].Text, tokens[group[k]].Text))
+                    {
+                        continue;
+                    }
+
+                    // A good boundary is worth a detour from the ideal length, but
+                    // a bounded one - hence scoring against distance rather than
+                    // overriding it.
+                    var adjusted = Math.Abs(prefix[k] - targetChars)
+                                   - BreakScore(tokens[group[k - 1]].Text, tokens[group[k]].Text) * 3;
+                    if (adjusted < bestAdjusted)
+                    {
+                        bestAdjusted = adjusted;
+                        best = k;
+                    }
+                }
+
+                return best > 0 ? best : Math.Max(1, group.Count / 2);
+            }
+
+            // Latin runs keep their spaces between tokens; CJK must not get any,
+            // or the text comes out as "ど う も よ み や で す".
+            string Join(List<int> group)
+            {
+                var sb = new StringBuilder();
+                foreach (var k in group)
+                {
+                    var t = tokens[k].Text;
+                    if (sb.Length > 0 && t.Length > 0 && sb[sb.Length - 1] < 128 && t[0] < 128 &&
+                        !IsPurePunctuation(t[0].ToString()))
+                    {
+                        sb.Append(' ');
+                    }
+
+                    sb.Append(t);
+                }
+
+                return sb.ToString().Trim();
+            }
+
+            // Stage 1: sentences. A sentence ends at terminal punctuation, or where
+            // the speaker audibly stopped.
+            var sentences = new List<List<int>>();
+            var pending = new List<int>();
+            for (var i = 0; i < tokens.Count; i++)
+            {
+                if (pending.Count > 0)
+                {
+                    var pause = tokens[i].Start - tokens[pending[pending.Count - 1]].End;
+                    if (pause > 3.0 || (pause > 1.5 && EndsClause(Join(pending))))
+                    {
+                        sentences.Add(pending);
+                        pending = new List<int>();
+                    }
+                }
+
+                pending.Add(i);
+                if (IsTerminal(tokens[i].Text))
+                {
+                    // Absorb punctuation trailing the sentence end, so a lone "。"
+                    // never becomes a subtitle of its own.
+                    while (i + 1 < tokens.Count && IsPurePunctuation(tokens[i + 1].Text))
+                    {
+                        pending.Add(++i);
+                    }
+
+                    sentences.Add(pending);
+                    pending = new List<int>();
+                }
+            }
+
+            if (pending.Count > 0)
+            {
+                sentences.Add(pending);
+            }
+
+            // Stage 2: presentation.
             var subtitle = new Subtitle();
-
-            // Ported from qwen3-asr.cpp's own alignment_to_srt(): break on terminal
-            // punctuation first, and only fall back to a raw silence gap or a hard
-            // length cap when there's no punctuation to anchor on. The previous version
-            // here only looked at gaps/length (never punctuation), which routinely left
-            // a trailing "。" orphaned at the start of the next line, or glued several
-            // unrelated sentences into one block whenever they weren't separated by a
-            // long enough pause (issue: subtitle lines starting with "." that should
-            // have closed the previous sentence instead).
-            static bool EndsClause(string s)
+            foreach (var sentence in sentences)
             {
-                if (s.Length == 0)
+                var totalChars = sentence.Sum(k => tokens[k].Text.Length);
+                var pieceCount = Math.Max(1, (int)Math.Ceiling(totalChars / (double)maxSubtitleChars));
+
+                var pieces = new List<List<int>>();
+                var rest = sentence;
+                for (var p = pieceCount; p > 1 && rest.Count > 1; p--)
                 {
-                    return false;
+                    var cut = ChooseBreak(rest, rest.Sum(k => tokens[k].Text.Length) / p);
+                    pieces.Add(rest.Take(cut).ToList());
+                    rest = rest.Skip(cut).ToList();
                 }
 
-                return s[s.Length - 1] is ',' or '.' or '?' or '!' or '、' or '，' or '。';
-            }
-
-            static bool IsTerminalPunctuation(string word)
-            {
-                return word.Contains('。') || word.Contains('？') || word.Contains('！') ||
-                       word.Contains('.') || word.Contains('?') || word.Contains('!') ||
-                       word.Contains('\n');
-            }
-
-            // A word made up entirely of punctuation carries no meaning on its own line -
-            // it only makes sense glued to whichever sentence it closes. Used to fold a
-            // stray "。" (etc.) that got orphaned by a pause back onto the previous line
-            // instead of letting it become its own one-character subtitle.
-            static bool IsPurePunctuation(string word)
-            {
-                if (string.IsNullOrEmpty(word))
+                if (rest.Count > 0)
                 {
-                    return false;
+                    pieces.Add(rest);
                 }
 
-                foreach (var c in word)
+                foreach (var piece in pieces)
                 {
-                    if (c is not ('。' or '？' or '！' or '.' or '?' or '!' or '、' or ',' or '\n'))
+                    var text = Join(piece);
+                    if (text.Length > maxLineChars && piece.Count > 1)
                     {
-                        return false;
-                    }
-                }
-
-                return true;
-            }
-
-            var wordList = words.EnumerateArray().ToList();
-            var i = 0;
-            while (i < wordList.Count)
-            {
-                var currentText = new StringBuilder();
-                var startTime = wordList[i].GetProperty("start").GetDouble();
-                var endTime = wordList[i].GetProperty("end").GetDouble();
-                var wordCount = 0;
-
-                while (i < wordList.Count)
-                {
-                    var word = wordList[i];
-                    var text = word.GetProperty("word").GetString() ?? string.Empty;
-                    var start = word.GetProperty("start").GetDouble();
-                    var end = word.GetProperty("end").GetDouble();
-
-                    var pause = start - endTime;
-                    if (wordCount > 0 && (pause > 3.0 || (pause > 1.5 && EndsClause(currentText.ToString()))))
-                    {
-                        break;
-                    }
-
-                    // Only insert a space between two Latin-script tokens - CJK text has no
-                    // spaces between words, so adding one after every single character (as a
-                    // prior version of this code did unconditionally) produced garbled output
-                    // like "ど う も よ み や で す".
-                    if (currentText.Length > 0 && text.Length > 0 &&
-                        currentText[currentText.Length - 1] < 128 && text[0] < 128 &&
-                        !IsPurePunctuation(text[0].ToString()))
-                    {
-                        currentText.Append(' ');
-                    }
-
-                    currentText.Append(text);
-                    if (end > endTime)
-                    {
-                        endTime = end;
-                    }
-                    wordCount++;
-                    i++;
-
-                    if (IsTerminalPunctuation(text))
-                    {
-                        break;
-                    }
-
-                    if (wordCount >= 20 || currentText.Length >= 80)
-                    {
-                        // Don't cut a couple of characters short of a real sentence end: if
-                        // terminal punctuation is reachable within a few more words with no
-                        // real pause in between, keep going instead of hard-cutting here -
-                        // the IsTerminalPunctuation check above will close the line there.
-                        var extending = false;
-                        var lookaheadEnd = endTime;
-                        for (var j = i; j < Math.Min(i + 5, wordList.Count); j++)
+                        var at = ChooseBreak(piece, piece.Sum(k => tokens[k].Text.Length) / 2);
+                        var first = Join(piece.Take(at).ToList());
+                        var second = Join(piece.Skip(at).ToList());
+                        if (first.Length > 0 && second.Length > 0)
                         {
-                            var la = wordList[j];
-                            var laText = la.GetProperty("word").GetString() ?? string.Empty;
-                            var laStart = la.GetProperty("start").GetDouble();
-                            if (laStart - lookaheadEnd > 1.0)
-                            {
-                                break;
-                            }
-
-                            lookaheadEnd = la.GetProperty("end").GetDouble();
-                            if (IsTerminalPunctuation(laText))
-                            {
-                                extending = true;
-                                break;
-                            }
-                        }
-
-                        if (!extending)
-                        {
-                            break;
+                            text = first + Environment.NewLine + second;
                         }
                     }
+
+                    subtitle.Paragraphs.Add(new Paragraph(
+                        text,
+                        tokens[piece[0]].Start * 1000.0,
+                        piece.Max(k => tokens[k].End) * 1000.0));
                 }
-
-                // Fold any immediately-following punctuation-only word(s) into the line
-                // that just closed, rather than letting a lone "。" start the next one.
-                while (i < wordList.Count && currentText.Length > 0)
-                {
-                    var trailing = wordList[i].GetProperty("word").GetString() ?? string.Empty;
-                    if (!IsPurePunctuation(trailing))
-                    {
-                        break;
-                    }
-
-                    currentText.Append(trailing);
-                    var trailingEnd = wordList[i].GetProperty("end").GetDouble();
-                    if (trailingEnd > endTime)
-                    {
-                        endTime = trailingEnd;
-                    }
-
-                    i++;
-                }
-
-                subtitle.Paragraphs.Add(new Paragraph(currentText.ToString().Trim(), startTime * 1000.0, endTime * 1000.0));
             }
 
             FixNegativeDuration(subtitle);
@@ -3193,6 +3318,16 @@ public partial class SpeechToTextViewModel : ObservableObject
         return baseEngine.GetModelForCmdLine(aligner.FileName);
     }
 
+    private static string GetForcedAlignerPath(Qwen3AsrCppEngine engine, ForcedAlignerOption? aligner)
+    {
+        if (aligner == null || aligner.IsBuiltIn || string.IsNullOrEmpty(aligner.FileName))
+        {
+            return string.Empty;
+        }
+
+        return engine.GetModelForCmdLine(aligner.FileName);
+    }
+
     [RelayCommand]
     private async Task Transcribe()
     {
@@ -3585,10 +3720,12 @@ public partial class SpeechToTextViewModel : ObservableObject
                 }
             }
 
-            if (engine is ICrispAsrEngine crispAsrEngineForAligner
-                && SelectedForcedAligner != null && !SelectedForcedAligner.IsBuiltIn)
+            if (SelectedForcedAligner != null && !SelectedForcedAligner.IsBuiltIn
+                && engine is ICrispAsrEngine or Qwen3AsrCppEngine)
             {
-                var alignerPath = GetForcedAlignerPath(crispAsrEngineForAligner, SelectedForcedAligner);
+                var alignerPath = engine is Qwen3AsrCppEngine qwen3ForAligner
+                    ? GetForcedAlignerPath(qwen3ForAligner, SelectedForcedAligner)
+                    : GetForcedAlignerPath((ICrispAsrEngine)engine, SelectedForcedAligner);
                 if (string.IsNullOrEmpty(alignerPath) || !File.Exists(alignerPath))
                 {
                     var alignerWhisperModel = SelectedForcedAligner.ToWhisperModel();
@@ -3914,9 +4051,19 @@ public partial class SpeechToTextViewModel : ObservableObject
             var qwen3ExtraArgs = engine.CommandLineParameter;
             var qwen3VadArg = qwen3Asr.IsVadModelInstalled() ? $" --vad-model \"{qwen3Asr.GetVadModelPath()}\"" : string.Empty;
 
+            // A selected wav2vec2 aligner replaces the bundled Qwen3 one for timing.
+            // Its CTC alignment is monotonic, so it cannot leave the multi-second
+            // holes the autoregressive aligner sometimes produces mid-sentence - at
+            // the cost of being language-specific, hence the explicit choice.
+            var ctcAlignerPath = GetForcedAlignerPath(qwen3Asr, SelectedForcedAligner);
+            var useCtcAligner = !string.IsNullOrEmpty(ctcAlignerPath) && File.Exists(ctcAlignerPath);
+            var qwen3AlignerArg = useCtcAligner
+                ? $"--ctc-align-model \"{ctcAlignerPath}\""
+                : $"--aligner-model \"{qwen3Asr.GetModelForCmdLine(alignerModel.Name)}\"";
+
             var qwen3Params = string.IsNullOrWhiteSpace(qwen3ExtraArgs)
-                ? $"-m \"{qwen3Asr.GetModelForCmdLine(model)}\" --aligner-model \"{qwen3Asr.GetModelForCmdLine(alignerModel.Name)}\"{qwen3VadArg} -f \"{waveFileName}\" --transcribe-align -o \"{_qwen3AsrOutputJsonPath}\""
-                : $"{qwen3ExtraArgs} -m \"{qwen3Asr.GetModelForCmdLine(model)}\" --aligner-model \"{qwen3Asr.GetModelForCmdLine(alignerModel.Name)}\"{qwen3VadArg} -f \"{waveFileName}\" --transcribe-align -o \"{_qwen3AsrOutputJsonPath}\"";
+                ? $"-m \"{qwen3Asr.GetModelForCmdLine(model)}\" {qwen3AlignerArg}{qwen3VadArg} -f \"{waveFileName}\" --transcribe-align -o \"{_qwen3AsrOutputJsonPath}\""
+                : $"{qwen3ExtraArgs} -m \"{qwen3Asr.GetModelForCmdLine(model)}\" {qwen3AlignerArg}{qwen3VadArg} -f \"{waveFileName}\" --transcribe-align -o \"{_qwen3AsrOutputJsonPath}\"";
 
             var p = new Process
             {
