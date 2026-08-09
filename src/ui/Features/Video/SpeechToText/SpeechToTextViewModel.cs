@@ -1296,6 +1296,35 @@ public partial class SpeechToTextViewModel : ObservableObject
                 sentences.Add(pending);
             }
 
+            // Rapid dialogue yields sentences barely a tenth of a second long
+            // ("おお。", "怖。") - correct, but far too brief to read. Subtitle Edit
+            // will not merge them, since a line ending in 。 counts as a finished
+            // sentence rather than a continuation, so join them here while they
+            // stay short, close together, and small enough to share one subtitle.
+            var mergedSentences = new List<List<int>>();
+            for (var i = 0; i < sentences.Count; i++)
+            {
+                var group = new List<int>(sentences[i]);
+                while (i + 1 < sentences.Count)
+                {
+                    var next = sentences[i + 1];
+                    var groupDuration = tokens[group[group.Count - 1]].End - tokens[group[0]].Start;
+                    var gap = tokens[next[0]].Start - tokens[group[group.Count - 1]].End;
+                    var combined = group.Sum(k => tokens[k].Text.Length) + next.Sum(k => tokens[k].Text.Length);
+                    if (groupDuration >= 1.5 || gap >= 0.6 || combined > maxSubtitleChars)
+                    {
+                        break;
+                    }
+
+                    group.AddRange(next);
+                    i++;
+                }
+
+                mergedSentences.Add(group);
+            }
+
+            sentences = mergedSentences;
+
             // Stage 2: presentation.
             var subtitle = new Subtitle();
             foreach (var sentence in sentences)
