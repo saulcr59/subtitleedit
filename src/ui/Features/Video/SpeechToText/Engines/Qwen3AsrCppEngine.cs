@@ -118,7 +118,7 @@ public class Qwen3AsrCppEngine : ISpeechToTextEngine
     // if the file isn't there, the CLI silently falls back to its old fixed chunking.
     public string GetVadModelPath()
     {
-        return Path.Combine(GetAndCreateWhisperFolder(), "vad", "silero-vad-v5.1.2.bin");
+        return Path.Combine(GetAndCreateWhisperFolder(), "vad", "ggml-silero-v6.2.0.bin");
     }
 
     public bool IsVadModelInstalled() => File.Exists(GetVadModelPath());
