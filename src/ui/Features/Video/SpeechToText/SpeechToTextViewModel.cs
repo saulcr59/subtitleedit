@@ -8,6 +8,8 @@ using Nikse.SubtitleEdit.UiLogic.AudioToText;
 using Nikse.SubtitleEdit.Core.Common;
 using Nikse.SubtitleEdit.Core.ContainerFormats.Matroska;
 using Nikse.SubtitleEdit.Core.SubtitleFormats;
+using Nikse.SubtitleEdit.Features.Files.ImportPlainText;
+using Nikse.SubtitleEdit.Features.Main;
 using Nikse.SubtitleEdit.Features.Shared;
 using Nikse.SubtitleEdit.Features.Shared.GetAudioClips;
 using Nikse.SubtitleEdit.Features.Video.SpeechToText.Engines;
@@ -1573,17 +1575,18 @@ public partial class SpeechToTextViewModel : ObservableObject
                 }
             });
 
+            bool timesAreInterpolated;
             var audioSizeBytes = new FileInfo(audioFileName).Length;
             if (audioSizeBytes > engine.UploadThresholdBytes && _videoInfo.TotalSeconds > 0)
             {
                 LogToConsole($"Audio file is {audioSizeBytes / (1024 * 1024)} MB — splitting into chunks to stay under the upload cap");
-                await TranscribeInChunksAsync(service, engine, audioFileName, language, subtitle, segmentProgress, cancellationToken);
+                timesAreInterpolated = await TranscribeInChunksAsync(service, engine, audioFileName, language, subtitle, segmentProgress, cancellationToken);
             }
             else
             {
                 var response = await service.TranscribeAsync(audioFileName, language, null, segmentProgress, cancellationToken);
                 RememberDetectedLanguage(response);
-                IngestTranscriptionResponse(
+                timesAreInterpolated = IngestTranscriptionResponse(
                     response,
                     subtitle,
                     offsetSeconds: 0.0,
@@ -1593,6 +1596,15 @@ public partial class SpeechToTextViewModel : ObservableObject
 
             ProgressValue = 90;
             ProgressText = Se.Language.General.ProcessingResponse;
+
+            // Models that only return text (OpenAI's gpt-transcribe, for one) leave the
+            // cues spread across the audio by character count, which drifts against what
+            // is actually being said. A CTC forced aligner can measure the real times, so
+            // use one when the transcript came back without any.
+            if (timesAreInterpolated)
+            {
+                await TryRefineTimingsWithForcedAlignerAsync(subtitle, audioFileName, cancellationToken);
+            }
 
             ProgressValue = 100;
             ProgressText = Se.Language.General.TranscriptionComplete;
@@ -1742,7 +1754,12 @@ public partial class SpeechToTextViewModel : ObservableObject
     /// text-only fallback paragraph across the chunk's duration; otherwise
     /// chunks after the first would get zero-duration paragraphs.
     /// </summary>
-    private static void IngestTranscriptionResponse(
+    /// <returns>
+    /// True when the time codes were interpolated from text length rather than
+    /// reported by the provider, so the caller can offer to measure them against
+    /// the audio instead (see TryRefineTimingsWithForcedAlignerAsync).
+    /// </returns>
+    private static bool IngestTranscriptionResponse(
         OpenAiCompatibleSttResponse response,
         Subtitle subtitle,
         double offsetSeconds,
@@ -1753,7 +1770,7 @@ public partial class SpeechToTextViewModel : ObservableObject
         {
             if (subtitle.Paragraphs.Count > paragraphsBeforeResponse)
             {
-                return;
+                return false;
             }
 
             if (response.Segments != null && response.Segments.Count > 0)
@@ -1769,7 +1786,7 @@ public partial class SpeechToTextViewModel : ObservableObject
                             (segment.End + offsetSeconds) * 1000.0));
                     }
                 }
-                return;
+                return false;
             }
 
             if (!string.IsNullOrEmpty(response.Text))
@@ -1784,7 +1801,10 @@ public partial class SpeechToTextViewModel : ObservableObject
                     ? chunkEndSeconds * 1000.0
                     : startMs + 5000.0;
                 AddTextAsTimedSentences(subtitle, response.Text.Trim(), startMs, endMs);
+                return true;
             }
+
+            return false;
         }
     }
 
@@ -1860,7 +1880,8 @@ public partial class SpeechToTextViewModel : ObservableObject
     /// aborts the run; partial subtitle so far is preserved by the outer
     /// catch-blocks like the single-file path.
     /// </summary>
-    private async Task TranscribeInChunksAsync(
+    /// <returns>True if any chunk came back without time codes of its own.</returns>
+    private async Task<bool> TranscribeInChunksAsync(
         ISttTranscriber service,
         IOnlineSttEngine engine,
         string audioFileName,
@@ -1869,6 +1890,7 @@ public partial class SpeechToTextViewModel : ObservableObject
         IProgress<OpenAiCompatibleSegment> segmentProgress,
         CancellationToken cancellationToken)
     {
+        var anyInterpolated = false;
         var totalSeconds = _videoInfo.TotalSeconds;
         var fileSize = new FileInfo(audioFileName).Length;
         var chunkCount = OpenAiSttChunker.ComputeChunkCount(fileSize, engine.ChunkSizeBytes);
@@ -1938,7 +1960,7 @@ public partial class SpeechToTextViewModel : ObservableObject
                     chunkPath, language, null, offsettingProgress, cancellationToken);
 
                 RememberDetectedLanguage(chunkResponse);
-                IngestTranscriptionResponse(
+                anyInterpolated |= IngestTranscriptionResponse(
                     chunkResponse,
                     subtitle,
                     offsetSeconds,
@@ -1957,6 +1979,141 @@ public partial class SpeechToTextViewModel : ObservableObject
                 } } catch { /* swept later */ }
             }
         }
+
+        return anyInterpolated;
+    }
+
+    /// <summary>
+    /// Replaces interpolated time codes with ones measured against the audio, using a
+    /// wav2vec2 CTC forced aligner run through qwen3-asr-cli.
+    /// <para>
+    /// Providers that return text only (OpenAI's gpt-transcribe) leave the cues spread
+    /// across each chunk in proportion to how many characters they contain, which drifts
+    /// against the actual speech - the transcript is right but the timing is a guess.
+    /// Forced alignment answers the different question of where that known-correct text
+    /// occurs, which is exactly what is missing here.
+    /// </para>
+    /// <para>
+    /// Entirely opportunistic: with no engine or no aligner model installed the
+    /// interpolated times are left alone, and any failure is logged and swallowed rather
+    /// than losing a transcript that is otherwise fine.
+    /// </para>
+    /// </summary>
+    private async Task TryRefineTimingsWithForcedAlignerAsync(
+        Subtitle subtitle,
+        string audioFileName,
+        CancellationToken cancellationToken)
+    {
+        if (subtitle.Paragraphs.Count == 0)
+        {
+            return;
+        }
+
+        var qwen3 = new Qwen3AsrCppEngine();
+        if (!qwen3.IsEngineInstalled())
+        {
+            return;
+        }
+
+        var alignerModel = FindInstalledCtcAligner(qwen3);
+        if (alignerModel == null)
+        {
+            LogToConsole("No wav2vec2 CTC aligner model installed — keeping the interpolated time codes");
+            return;
+        }
+
+        var workFolder = Path.Combine(Path.GetTempPath(), "se-stt-align-" + Guid.NewGuid().ToString("N"));
+
+        try
+        {
+            Directory.CreateDirectory(workFolder);
+
+            var ffmpegPath = Se.Settings.General.FfmpegPath;
+            if (!File.Exists(ffmpegPath))
+            {
+                ffmpegPath = "ffmpeg";
+            }
+
+            ProgressText = Se.Language.General.ProcessingResponse;
+            LogToConsole($"Aligning {subtitle.Paragraphs.Count} line(s) against the audio using {Path.GetFileName(alignerModel)}");
+
+            var lines = subtitle.Paragraphs.Select(p => new SubtitleLineViewModel(p, new SubRip())).ToList();
+
+            using var audio = new FfmpegWindowAudioSource(ffmpegPath, audioFileName, _videoInfo.TotalSeconds, workFolder);
+            var runner = new Qwen3AsrAlignOnlyRunner(qwen3.GetExecutable(), alignerModel, Se.WriteToolsLog);
+            var forcedAligner = new ForcedAligner(runner, audio);
+
+            var result = await forcedAligner.AlignAsync(lines, progress: null, cancellationToken);
+
+            // Only paragraphs the aligner actually placed are updated; the rest keep the
+            // interpolated times, which beats leaving them at zero.
+            for (var i = 0; i < subtitle.Paragraphs.Count && i < lines.Count; i++)
+            {
+                subtitle.Paragraphs[i].StartTime.TotalMilliseconds = lines[i].StartTime.TotalMilliseconds;
+                subtitle.Paragraphs[i].EndTime.TotalMilliseconds = lines[i].EndTime.TotalMilliseconds;
+            }
+
+            LogToConsole($"Forced alignment placed {result.AlignedLines}/{result.TotalLines} line(s)");
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            // A failed refinement must not cost the user the transcript itself.
+            Se.WriteToolsLog($"Forced alignment of the online transcript failed: {ex}", true);
+            LogToConsole($"Forced alignment failed ({ex.Message}) — keeping the interpolated time codes");
+        }
+        finally
+        {
+            try
+            {
+                if (Directory.Exists(workFolder))
+                {
+                    Directory.Delete(workFolder, true);
+                }
+            }
+            catch
+            {
+                // Temp cleanup is best effort.
+            }
+        }
+    }
+
+    /// <summary>
+    /// Picks a CTC aligner for the transcript's language, preferring one whose language
+    /// code matches and falling back to any installed wav2vec2 aligner. Returns null if
+    /// none is on disk.
+    /// </summary>
+    private string? FindInstalledCtcAligner(Qwen3AsrCppEngine engine)
+    {
+        var languageCode = (!string.IsNullOrEmpty(_onlineDetectedLanguage)
+            ? _onlineDetectedLanguage
+            : SelectedLanguage?.Code ?? string.Empty).ToLowerInvariant();
+
+        var options = ForcedAlignerOption.Wav2Vec2All()
+            .Where(o => !string.IsNullOrEmpty(o.FileName))
+            .Select(o => (Option: o, Path: engine.GetModelForCmdLine(o.FileName)))
+            .Where(x => File.Exists(x.Path) && new FileInfo(x.Path).Length > 10_000_000)
+            .ToList();
+
+        if (options.Count == 0)
+        {
+            return null;
+        }
+
+        if (!string.IsNullOrEmpty(languageCode))
+        {
+            var match = options.FirstOrDefault(x =>
+                x.Option.Choice.StartsWith("wav2vec2-aligner-" + languageCode, StringComparison.OrdinalIgnoreCase));
+            if (match.Path != null)
+            {
+                return match.Path;
+            }
+        }
+
+        return options[0].Path;
     }
 
     /// <summary>
