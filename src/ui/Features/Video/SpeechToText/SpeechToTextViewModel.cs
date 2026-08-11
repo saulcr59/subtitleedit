@@ -3340,7 +3340,9 @@ public partial class SpeechToTextViewModel : ObservableObject
         var displays = new ObservableCollection<SpeechToTextModelDisplay>();
         foreach (var aligner in ForcedAlignerOption.All())
         {
-            if (aligner.IsBuiltIn)
+            // Skip the built-in aligner (nothing to fetch) and locally-supplied ones,
+            // which have no URL and so would sit in the list as an undownloadable entry.
+            if (aligner.IsBuiltIn || string.IsNullOrEmpty(aligner.Url))
             {
                 continue;
             }

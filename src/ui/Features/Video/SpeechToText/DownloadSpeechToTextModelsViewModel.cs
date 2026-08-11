@@ -401,9 +401,16 @@ public partial class DownloadSpeechToTextModelsViewModel : ObservableObject, ICl
             return;
         }
 
-        DownloadIsEnabled = false;
         _downloadUrls.Clear();
         _downloadUrls.AddRange(model.Model.Urls);
+        if (_downloadUrls.Count == 0)
+        {
+            // Locally-supplied models carry no URL. Nothing to fetch, and indexing
+            // straight into the empty list below would throw.
+            return;
+        }
+
+        DownloadIsEnabled = false;
         _downloadIndex = 0;
         _downloadModel = model.Model;
         _downloadFileName = GetDownloadFileName(model.Model, _downloadUrls[_downloadIndex]);

@@ -26,6 +26,10 @@ public class ForcedAlignerOption
     public const string Wav2Vec2UkChoice = "wav2vec2-aligner-uk";
     public const string Wav2Vec2CsChoice = "wav2vec2-aligner-cs";
 
+    // Not part of the CrispASR alias set: a locally-supplied Japanese aligner that
+    // measured better than the shipped one (see Wav2Vec2MetaByCode for the numbers).
+    public const string Wav2Vec2JaIvydataChoice = "wav2vec2-aligner-ja-ivydata";
+
     public string BaseDisplay { get; }
     public string Display { get; set; }
     public string Choice { get; }
@@ -98,6 +102,7 @@ public class ForcedAlignerOption
         Wav2Vec2(Wav2Vec2ArChoice),
         Wav2Vec2(Wav2Vec2UkChoice),
         Wav2Vec2(Wav2Vec2CsChoice),
+        Wav2Vec2(Wav2Vec2JaIvydataChoice),
     };
 
     public static ForcedAlignerOption Wav2Vec2(string choice)
@@ -190,6 +195,24 @@ public class ForcedAlignerOption
                 "wav2vec2-xls-r-300m-cs-250-q4_k.gguf",
                 HfBase + "wav2vec2-xls-r-300m-cs-250-GGUF/resolve/main/wav2vec2-xls-r-300m-cs-250-q4_k.gguf",
                 "~300 MB"),
+
+            // Ivydata/wav2vec2-large-xlsr-53-japanese, converted with
+            // scripts/convert_wav2vec2_ctc_to_gguf.py. Same layer-norm architecture and
+            // Apache-2.0 licence as the "ja" entry above, but measurably better at the
+            // job an aligner actually does: over a 10-clip battery of real Japanese audio
+            // scored by teacher-forced Viterbi peak log-likelihood (how confidently the
+            // model finds the known-correct character at its aligned position), it won
+            // 10/10 - mean -1.733 vs -3.028 - and 7/10 on an independent greedy-decode
+            // CER, with better vocabulary coverage (92.4% vs 91.0%).
+            //
+            // Kept at f16 rather than Q4_K: the quality gain is the whole point of the
+            // swap, and it is a forced aligner, so it runs once over already-transcribed
+            // audio. No URL - this one is supplied locally, so it is offered in the combo
+            // but never listed as downloadable.
+            ["ja-ivydata"] = new(Wav2Vec2JaIvydataChoice, "wav2vec2 aligner (Japanese, Ivydata)",
+                "wav2vec2-ctc-ja-ivydata-f16.gguf",
+                string.Empty,
+                "~608 MB"),
         };
 
     public static IReadOnlyList<ForcedAlignerOption> All()
