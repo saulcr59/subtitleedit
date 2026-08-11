@@ -23,8 +23,51 @@ public class OpenAiCompatibleSttResponse
     [JsonPropertyName("language")]
     public string? Language { get; set; }
 
+    /// <summary>
+    /// Detected languages under a plural key. OpenAI's gpt-transcribe reports
+    /// <c>"languages": [{"code": "ja"}]</c> and never sends the singular
+    /// <see cref="Language"/>, so without this its transcripts arrive with no
+    /// language attached at all.
+    /// </summary>
+    [JsonPropertyName("languages")]
+    public List<OpenAiCompatibleDetectedLanguage>? Languages { get; set; }
+
+    /// <summary>
+    /// The reported language whichever key the provider used, or null.
+    /// </summary>
+    [JsonIgnore]
+    public string? EffectiveLanguage
+    {
+        get
+        {
+            if (!string.IsNullOrWhiteSpace(Language))
+            {
+                return Language;
+            }
+
+            if (Languages != null)
+            {
+                foreach (var language in Languages)
+                {
+                    if (!string.IsNullOrWhiteSpace(language.Code))
+                    {
+                        return language.Code;
+                    }
+                }
+            }
+
+            return null;
+        }
+    }
+
     [JsonPropertyName("duration")]
     public double? Duration { get; set; }
+}
+
+public class OpenAiCompatibleDetectedLanguage
+{
+    [JsonPropertyName("code")]
+    public string? Code { get; set; }
 }
 
 public class OpenAiCompatibleSegment

@@ -2143,6 +2143,19 @@ public partial class SpeechToTextViewModel : ObservableObject
         }
     }
 
+    private static string FirstNonEmpty(params string?[] candidates)
+    {
+        foreach (var candidate in candidates)
+        {
+            if (!string.IsNullOrWhiteSpace(candidate))
+            {
+                return candidate.Trim();
+            }
+        }
+
+        return string.Empty;
+    }
+
     /// <summary>
     /// Picks a CTC aligner for the transcript's language, preferring one whose language
     /// code matches and falling back to any installed wav2vec2 aligner. Returns null if
@@ -2150,9 +2163,14 @@ public partial class SpeechToTextViewModel : ObservableObject
     /// </summary>
     private string? FindInstalledCtcAligner(Qwen3AsrCppEngine engine)
     {
-        var languageCode = (!string.IsNullOrEmpty(_onlineDetectedLanguage)
-            ? _onlineDetectedLanguage
-            : SelectedLanguage?.Code ?? string.Empty).ToLowerInvariant();
+        // What the provider reported first, then what the user told it to expect - the
+        // Language Hint field is the only language input the online engines show, so
+        // ignoring it would leave the aligner to be picked at random.
+        var languageCode = FirstNonEmpty(
+            _onlineDetectedLanguage,
+            OpenAiCompatibleSttLanguage,
+            OpenRouterSttLanguage,
+            SelectedLanguage?.Code).ToLowerInvariant();
 
         var options = ForcedAlignerOption.Wav2Vec2All()
             .Where(o => !string.IsNullOrEmpty(o.FileName))
@@ -2562,12 +2580,13 @@ public partial class SpeechToTextViewModel : ObservableObject
     /// </summary>
     private void RememberDetectedLanguage(OpenAiCompatibleSttResponse response)
     {
-        if (!string.IsNullOrEmpty(_onlineDetectedLanguage) || string.IsNullOrWhiteSpace(response.Language))
+        var effective = response.EffectiveLanguage;
+        if (!string.IsNullOrEmpty(_onlineDetectedLanguage) || string.IsNullOrWhiteSpace(effective))
         {
             return;
         }
 
-        var reported = response.Language.Trim();
+        var reported = effective.Trim();
         if (reported.Length == 2)
         {
             _onlineDetectedLanguage = reported.ToLowerInvariant();
