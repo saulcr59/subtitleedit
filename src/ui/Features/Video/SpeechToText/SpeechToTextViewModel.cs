@@ -2099,9 +2099,20 @@ public partial class SpeechToTextViewModel : ObservableObject
             ProgressText = Se.Language.General.ProcessingResponse;
             LogToConsole($"Aligning {subtitle.Paragraphs.Count} line(s) against the audio using {Path.GetFileName(alignerModel)}");
 
+            // The uploaded audio is whatever format the provider wanted (MP3 by default),
+            // and windows are cut from it with `-c copy`, so they inherit that format.
+            // The aligner reads 16 kHz mono PCM only, so transcode once up front rather
+            // than handing it MP3 windows it cannot open.
+            var alignAudio = Path.Combine(workFolder, "align.wav");
+            if (!await ExtractPcmForAlignmentAsync(ffmpegPath, audioFileName, alignAudio, cancellationToken))
+            {
+                LogToConsole("Could not extract 16 kHz audio for alignment — keeping the interpolated time codes");
+                return;
+            }
+
             var lines = subtitle.Paragraphs.Select(p => new SubtitleLineViewModel(p, new SubRip())).ToList();
 
-            using var audio = new FfmpegWindowAudioSource(ffmpegPath, audioFileName, _videoInfo.TotalSeconds, workFolder);
+            using var audio = new FfmpegWindowAudioSource(ffmpegPath, alignAudio, _videoInfo.TotalSeconds, workFolder);
             var runner = new Qwen3AsrAlignOnlyRunner(qwen3.GetExecutable(), alignerModel, Se.WriteToolsLog);
             var forcedAligner = new ForcedAligner(runner, audio);
 
@@ -2141,6 +2152,32 @@ public partial class SpeechToTextViewModel : ObservableObject
                 // Temp cleanup is best effort.
             }
         }
+    }
+
+    /// <summary>16 kHz mono PCM - what every CTC aligner expects.</summary>
+    private static async Task<bool> ExtractPcmForAlignmentAsync(
+        string ffmpegPath,
+        string inputFileName,
+        string outputFileName,
+        CancellationToken cancellationToken)
+    {
+        var arguments =
+            $"-hide_banner -nostats -y -i \"{inputFileName}\" -vn -ar 16000 -ac 1 -acodec pcm_s16le \"{outputFileName}\"";
+
+        using var process = new Process
+        {
+            StartInfo = new ProcessStartInfo(ffmpegPath, arguments)
+            {
+                CreateNoWindow = true,
+                UseShellExecute = false,
+                RedirectStandardError = true,
+                RedirectStandardOutput = true,
+            },
+        };
+
+        process.Start();
+        await process.WaitForExitAsync(cancellationToken).ConfigureAwait(false);
+        return process.ExitCode == 0 && File.Exists(outputFileName);
     }
 
     private static string FirstNonEmpty(params string?[] candidates)
