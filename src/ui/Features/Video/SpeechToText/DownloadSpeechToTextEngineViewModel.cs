@@ -270,7 +270,16 @@ public partial class DownloadSpeechToTextEngineViewModel : ObservableObject, ICl
                 TitleText = Se.Language.Video.AudioToText.UnpackingSpeechToTextEngine;
                 Unpack(folder, skipFolder);
 
-                if (Engine is not (ChatLlmCppEngine or Qwen3AsrCppEngine))
+                if (Engine is Qwen3AsrCppEngine qwen3AsrCpp)
+                {
+                    // qwen3-asr-cli takes the VAD model from a "vad" subfolder rather than
+                    // the engine root the whisper engines use, so derive the destination
+                    // from the engine instead of assuming it is the unpack folder. Without
+                    // this the model never lands where GetVadModelPath() looks and silence
+                    // chunking stays silently off on a clean install.
+                    DownloadAndUnpackSileroVad(Path.GetDirectoryName(qwen3AsrCpp.GetVadModelPath())!);
+                }
+                else if (Engine is not ChatLlmCppEngine)
                 {
                     DownloadAndUnpackSileroVad(folder);
                 }
@@ -438,8 +447,13 @@ public partial class DownloadSpeechToTextEngineViewModel : ObservableObject, ICl
             return;
         }
 
-        var sileroFileName = "ggml-silero-vad.bin";
-        if (File.Exists(Path.Combine(folder, sileroFileName)))
+        // The archive now ships a versioned name (ggml-silero-v6.2.0.bin); the old fixed
+        // name only survives in installs predating that switch. Match both, the way the
+        // VAD lookups elsewhere do, so an already-present model isn't fetched again on
+        // every engine install.
+        if (Directory.Exists(folder) &&
+            (Directory.GetFiles(folder, "ggml-silero-v*.bin", SearchOption.TopDirectoryOnly).Length > 0 ||
+             File.Exists(Path.Combine(folder, "ggml-silero-vad.bin"))))
         {
             return;
         }
