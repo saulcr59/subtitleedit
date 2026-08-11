@@ -2627,6 +2627,14 @@ public partial class SpeechToTextViewModel : ObservableObject
             return false;
         }
 
+        // An error about response_format names the model too ("'verbose_json' is not
+        // compatible with model 'gpt-transcribe-api-ev3'"), which used to trip the
+        // check below and told the user to clear a Model field that was perfectly fine.
+        if (ex.Message.Contains("response_format", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
         // The message holds the server's response body, so an error naming the
         // model we sent - or just talking about models at all - points at the field.
         return ex.Message.Contains(model.Trim(), StringComparison.OrdinalIgnoreCase) ||

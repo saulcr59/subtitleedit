@@ -147,10 +147,10 @@ public class OpenAiSttService : ISttTranscriber
         // unless `response_format=verbose_json` (issue #11146). Send the
         // granularity hints only with verbose_json — segments come through
         // the SSE `transcript.text.done` event anyway during streaming.
-        var responseFormat = _settings.Stream ? "json" : "verbose_json";
-        content.Add(new StringContent(responseFormat), "response_format");
+        var verbose = !_settings.Stream && SupportsVerboseJson(_settings.Model);
+        content.Add(new StringContent(verbose ? "verbose_json" : "json"), "response_format");
 
-        if (!_settings.Stream)
+        if (verbose)
         {
             content.Add(new StringContent("segment"), "timestamp_granularities[]");
             content.Add(new StringContent("word"), "timestamp_granularities[]");
@@ -210,10 +210,10 @@ public class OpenAiSttService : ISttTranscriber
             var temperatureSummary = _settings.Temperature > 0
                 ? _settings.Temperature.ToString("F2", CultureInfo.InvariantCulture)
                 : "(not sent)";
-            var granularitiesSummary = _settings.Stream ? "(not sent)" : "[segment,word]";
+            var granularitiesSummary = verbose ? "[segment,word]" : "(not sent)";
             var paramSummary =
                 $"model={_settings.Model}, language={languageToUse}, " +
-                $"response_format={responseFormat}, timestamp_granularities={granularitiesSummary}, " +
+                $"response_format={(verbose ? "verbose_json" : "json")}, timestamp_granularities={granularitiesSummary}, " +
                 $"stream={(_settings.Stream ? "true" : "(not sent)")}, " +
                 $"temperature={temperatureSummary}, " +
                 $"promptLen={_settings.Prompt?.Length ?? 0}, file={fileName}";
@@ -383,6 +383,32 @@ public class OpenAiSttService : ISttTranscriber
         {
             // Ignore malformed JSON
         }
+    }
+
+    /// <summary>
+    /// Whether the model will accept <c>response_format=verbose_json</c>, the only format
+    /// that carries timestamps.
+    /// <para>
+    /// Of OpenAI's transcription models only whisper-1 does; the whole gpt-*-transcribe
+    /// family answers 400 "response_format 'verbose_json' is not compatible with model"
+    /// and takes json or text only. Asking anyway fails the request outright, so those
+    /// are sent as json and timed afterwards by forced alignment instead.
+    /// </para>
+    /// <para>
+    /// Unknown models keep verbose_json: this engine talks to arbitrary OpenAI-compatible
+    /// servers, most of which do support it, and downgrading by default would silently
+    /// throw away timestamps they were willing to provide.
+    /// </para>
+    /// </summary>
+    internal static bool SupportsVerboseJson(string? model)
+    {
+        if (string.IsNullOrWhiteSpace(model))
+        {
+            return true;
+        }
+
+        var name = model.Trim().ToLowerInvariant();
+        return !(name.StartsWith("gpt-", StringComparison.Ordinal) && name.Contains("transcribe", StringComparison.Ordinal));
     }
 
     private static OpenAiCompatibleSttResponse ParseJsonResponse(string jsonResponse)
