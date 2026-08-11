@@ -111,6 +111,68 @@ public partial class SpeechToTextViewModel : ObservableObject
     [ObservableProperty] private string _openAiCompatibleSttAudioFormat = "mp3";
     public ObservableCollection<string> OpenAiCompatibleSttAudioFormats { get; } = new(new[] { "mp3", "m4a", "webm", "wav" });
 
+    [ObservableProperty] private OpenAiSttPreset? _selectedOpenAiCompatibleSttPreset;
+    public ObservableCollection<OpenAiSttPreset> OpenAiCompatibleSttPresets { get; } = new(OpenAiSttPreset.All());
+
+    /// <summary>
+    /// True while a preset is being selected to match the current fields, so writing the
+    /// fields back does not immediately reset the combo to Custom.
+    /// </summary>
+    private bool _isApplyingOpenAiSttPreset;
+
+    partial void OnSelectedOpenAiCompatibleSttPresetChanged(OpenAiSttPreset? value)
+    {
+        if (value == null || value.IsCustom || _isApplyingOpenAiSttPreset)
+        {
+            return;
+        }
+
+        _isApplyingOpenAiSttPreset = true;
+        try
+        {
+            // The API key is never part of a preset - it is the one field that is
+            // genuinely the user's.
+            OpenAiCompatibleSttUrl = value.Url;
+            OpenAiCompatibleSttModel = value.Model;
+        }
+        finally
+        {
+            _isApplyingOpenAiSttPreset = false;
+        }
+    }
+
+    partial void OnOpenAiCompatibleSttUrlChanged(string? value) => SyncOpenAiSttPresetToFields();
+
+    partial void OnOpenAiCompatibleSttModelChanged(string? value) => SyncOpenAiSttPresetToFields();
+
+    /// <summary>
+    /// Keeps the combo showing whichever preset the current endpoint and model correspond
+    /// to, and Custom once they are edited into something unknown.
+    /// </summary>
+    private void SyncOpenAiSttPresetToFields()
+    {
+        if (_isApplyingOpenAiSttPreset)
+        {
+            return;
+        }
+
+        var match = OpenAiSttPreset.Match(OpenAiCompatibleSttPresets, OpenAiCompatibleSttUrl, OpenAiCompatibleSttModel);
+        if (ReferenceEquals(SelectedOpenAiCompatibleSttPreset, match))
+        {
+            return;
+        }
+
+        _isApplyingOpenAiSttPreset = true;
+        try
+        {
+            SelectedOpenAiCompatibleSttPreset = match;
+        }
+        finally
+        {
+            _isApplyingOpenAiSttPreset = false;
+        }
+    }
+
     [ObservableProperty] private bool _isOpenRouterSttVisible;
     [ObservableProperty] private string? _openRouterSttApiKey;
     [ObservableProperty] private string? _openRouterSttModel;

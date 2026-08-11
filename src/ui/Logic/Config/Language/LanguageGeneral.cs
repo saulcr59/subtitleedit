@@ -726,6 +726,9 @@ public class LanguageGeneral
     public string OpenAiCompatibleSttStreamHint { get; set; }
     public string OpenAiCompatibleSttAudioFormat { get; set; }
     public string OpenAiCompatibleSttAudioFormatHint { get; set; }
+    public string OpenAiCompatibleSttPreset { get; set; }
+    public string OpenAiCompatibleSttPresetHint { get; set; }
+    public string OpenAiCompatibleSttPresetCustom { get; set; }
     public string ConfigurationRequired { get; set; }
     public string TranscriptionError { get; set; }
     public string TranscriptionComplete { get; set; }
@@ -1464,6 +1467,9 @@ public class LanguageGeneral
         OpenAiCompatibleSttStreamHint = "Send 'stream=true' to receive live text deltas (SSE). Disable for servers that reject the 'stream' parameter (e.g. Groq).";
         OpenAiCompatibleSttAudioFormat = "Audio upload format";
         OpenAiCompatibleSttAudioFormatHint = "Audio format sent to the STT server. OpenAI caps uploads at 25 MB, so MP3/M4A/WebM (Opus) are recommended for long videos. WAV is lossless but ~5x larger.";
+        OpenAiCompatibleSttPreset = "Preset";
+        OpenAiCompatibleSttPresetHint = "Fills in the endpoint and model for a known provider. Only the API key is still needed. 'gpt-transcribe' returns no timestamps, so an installed wav2vec2 CTC aligner is used to time the result against the audio.";
+        OpenAiCompatibleSttPresetCustom = "Custom";
         ConfigurationRequired = "Configuration Required";
         TranscriptionError = "Transcription Error";
         TranscriptionComplete = "Transcription complete";

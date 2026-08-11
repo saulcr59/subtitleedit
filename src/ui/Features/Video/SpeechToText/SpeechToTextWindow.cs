@@ -734,8 +734,15 @@ public class SpeechToTextWindow : Window
             .BindIsVisible(vm, nameof(vm.IsOpenAiCompatibleSttVisible));
         ToolTip.SetTip(comboAudioFormat, Se.Language.General.OpenAiCompatibleSttAudioFormatHint);
 
+        var comboPreset = UiUtil.MakeComboBox(vm.OpenAiCompatibleSttPresets, vm, nameof(vm.SelectedOpenAiCompatibleSttPreset))
+            .WithMinWidth(400)
+            .WithMarginTop(10)
+            .BindIsVisible(vm, nameof(vm.IsOpenAiCompatibleSttVisible));
+        ToolTip.SetTip(comboPreset, Se.Language.General.OpenAiCompatibleSttPresetHint);
+
         return new (Control, Control)[]
         {
+            (MakeLabel(Se.Language.General.OpenAiCompatibleSttPreset), comboPreset),
             (MakeLabel(Se.Language.General.OpenAiCompatibleSttEndpoint), MakeText(nameof(vm.OpenAiCompatibleSttUrl), 400)),
             (MakeLabel(Se.Language.General.OpenAiCompatibleSttApiKey), MakeText(nameof(vm.OpenAiCompatibleSttApiKey), 400, isPassword: true)),
             (MakeLabel(Se.Language.General.OpenAiCompatibleSttModel), MakeText(nameof(vm.OpenAiCompatibleSttModel), 250)),
