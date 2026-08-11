@@ -86,6 +86,52 @@ public class Qwen3AsrAlignOnlyRunnerTests
     }
 
     [Fact]
+    public void ALineWhoseFirstCharacterSwallowedSilenceStartsAtTheSound()
+    {
+        // Verbatim from the aligner on real audio: speech starts at 7.81 s, but the first
+        // character is reported as spanning 0.160-7.688 s because CTC assigns the silent
+        // frames to it. Taking that start verbatim put the cue 7 s early.
+        var lines = new[] { "どうも、" };
+        var words = new[]
+        {
+            W("ど", 0.160, 7.688), W("う", 7.688, 7.788),
+            W("も", 7.788, 7.888), W("、", 7.888, 7.928),
+        };
+
+        var cues = ForcedAligner.ParseCues(Qwen3AsrAlignOnlyRunner.BuildSrt(lines, words));
+
+        Assert.Single(cues);
+        Assert.True(cues[0].StartSeconds > 7.0,
+            $"cue starts at {cues[0].StartSeconds:F3}s, in the silence before the speech");
+        Assert.True(cues[0].StartSeconds <= 7.688, "cue must not start after the sound does");
+    }
+
+    [Fact]
+    public void AnOrdinaryLineKeepsItsReportedStart()
+    {
+        var claimed = new[] { (1.00, 1.14), (1.14, 1.26), (1.26, 1.40) };
+
+        Assert.Equal(1.00, Qwen3AsrAlignOnlyRunner.OnsetOf(claimed), 3);
+    }
+
+    [Fact]
+    public void ASingleCharacterLineHasNothingToCompareAgainst()
+    {
+        var claimed = new[] { (0.16, 7.69) };
+
+        Assert.Equal(0.16, Qwen3AsrAlignOnlyRunner.OnsetOf(claimed), 3);
+    }
+
+    [Fact]
+    public void ASlightlyLongFirstCharacterIsNotTrimmed()
+    {
+        // Twice the typical length is ordinary emphasis, not a swallowed pause.
+        var claimed = new[] { (1.00, 1.28), (1.28, 1.42), (1.42, 1.56) };
+
+        Assert.Equal(1.00, Qwen3AsrAlignOnlyRunner.OnsetOf(claimed), 3);
+    }
+
+    [Fact]
     public void ParsesTheClisJsonShape()
     {
         // Exactly what qwen3-asr-cli -o writes, trailing newline included.

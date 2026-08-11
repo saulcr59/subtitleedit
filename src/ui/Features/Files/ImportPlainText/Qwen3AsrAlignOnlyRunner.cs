@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
+using System.Linq;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -163,18 +164,20 @@ public sealed class Qwen3AsrAlignOnlyRunner : ForcedAligner.IRunner
         foreach (var line in fedLines)
         {
             var needed = CountVisible(line);
-            double? start = null;
             var end = lastEnd;
             var got = 0;
+            var claimed = new List<(double Start, double End)>();
 
             while (wordIndex < words.Count && got < needed)
             {
                 var w = words[wordIndex];
-                start ??= w.Start;
+                claimed.Add((w.Start, w.End));
                 end = w.End;
                 got += CountVisible(w.Text);
                 wordIndex++;
             }
+
+            double? start = claimed.Count > 0 ? OnsetOf(claimed) : null;
 
             // A line with no tokens left to claim still needs a cue: ParseCues maps
             // cues onto lines by position, so skipping one would shift every line
@@ -189,6 +192,49 @@ public sealed class Qwen3AsrAlignOnlyRunner : ForcedAligner.IRunner
         }
 
         return sb.ToString();
+    }
+
+    /// <summary>
+    /// When a line's first character reports an implausibly long span, its acoustic onset
+    /// is near the END of that span, not the start.
+    /// <para>
+    /// CTC alignment assigns blank frames to the symbol preceding them, so a character
+    /// that follows silence swallows it: on real audio whose speech starts at 7.81 s, the
+    /// first character was reported as spanning 0.16-7.69 s. Taking its start verbatim put
+    /// the cue seven seconds before anything was said. Its end, by contrast, is where the
+    /// next character begins - that is, the sound.
+    /// </para>
+    /// <para>
+    /// Detected by comparing against the line's own typical character length rather than a
+    /// fixed threshold, so it adapts to speaking rate and leaves ordinary lines untouched.
+    /// </para>
+    /// </summary>
+    internal static double OnsetOf(IReadOnlyList<(double Start, double End)> claimed)
+    {
+        var first = claimed[0];
+        if (claimed.Count < 2)
+        {
+            return first.Start;
+        }
+
+        var others = claimed.Skip(1).Select(c => c.End - c.Start).Where(d => d > 0).OrderBy(d => d).ToList();
+        if (others.Count == 0)
+        {
+            return first.Start;
+        }
+
+        var typical = others[others.Count / 2];
+        var firstDuration = first.End - first.Start;
+
+        // Both guards matter: the ratio catches a swallowed pause at any speaking rate,
+        // and the absolute floor stops a merely slightly-long character from being trimmed
+        // when the typical length is tiny.
+        if (firstDuration > typical * 3 && firstDuration > 0.4)
+        {
+            return Math.Max(first.Start, first.End - typical);
+        }
+
+        return first.Start;
     }
 
     private static int CountVisible(string s)

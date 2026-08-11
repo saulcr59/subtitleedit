@@ -95,18 +95,13 @@ public class ForcedAlignerLiveRepro
                 Console.WriteLine($"  {line.StartTime.TotalSeconds,7:F3} -> {line.EndTime.TotalSeconds,7:F3}  {line.Text}");
             }
 
-            // Silero puts the first speech in this file at 7.810 s; interpolated time codes
-            // start the first line near zero instead, so this separates "aligned" from "not
-            // aligned at all".
-            //
-            // Known gap, deliberately not asserted tightly yet: this currently lands at
-            // ~8.64 s, near the END of that first phrase rather than its start. CTC
-            // alignment absorbs silence into the character preceding it, so the first
-            // character of a window swallows the leading silence and its reported span is
-            // not its acoustic onset. Interior lines are unaffected - the second line lands
-            // at 9.229 s against Silero's 9.218 s.
+            // Silero puts the first speech in this file at 7.810 s. Interpolated time codes
+            // start the first line near zero; before the swallowed-silence correction this
+            // landed at 8.643 s, past the end of the phrase. Both failures are outside this
+            // range, so it distinguishes a correct alignment from either.
             var first = lines[0].StartTime.TotalSeconds;
-            Assert.True(first > 5.0, $"first line starts at {first:F3}s; speech starts at 7.810s");
+            Assert.True(first is > 6.5 and < 8.3,
+                $"first line starts at {first:F3}s; speech runs 7.810-8.670s");
         }
         finally
         {
