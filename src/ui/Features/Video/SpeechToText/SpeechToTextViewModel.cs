@@ -2114,9 +2114,29 @@ public partial class SpeechToTextViewModel : ObservableObject
 
             using var audio = new FfmpegWindowAudioSource(ffmpegPath, alignAudio, _videoInfo.TotalSeconds, workFolder);
             var runner = new Qwen3AsrAlignOnlyRunner(qwen3.GetExecutable(), alignerModel, Se.WriteToolsLog);
-            var forcedAligner = new ForcedAligner(runner, audio);
 
-            var result = await forcedAligner.AlignAsync(lines, progress: null, cancellationToken);
+            // The default 120 s window was tuned for crispasr, which is far faster per
+            // second of audio than this encoder. Measured here: 15 s of audio costs 4.4 s,
+            // 30 s costs 9.9 s, 45 s costs 17.8 s and 60 s costs 22.7 s - superlinear, so
+            // shorter windows cover the same audio in less total time. 45 s still leaves
+            // the aligner roughly three times its chunk's text in slack, which is what lets
+            // it skip audio the script does not cover, and stays well above the 15 s the
+            // cursor creeps when a window matches nothing.
+            var options = new ForcedAlignPlanner.Options { WindowSeconds = 45 };
+            var forcedAligner = new ForcedAligner(runner, audio, options);
+
+            // Alignment reloads the acoustic model for every window, so a long video takes
+            // minutes. Without progress the dialog sits at "Processing response..." looking
+            // hung, and the obvious reaction is to cancel a run that was working.
+            var alignProgress = new Progress<ForcedAligner.Progress>(p => Dispatcher.UIThread.Post(() =>
+            {
+                ProgressText = $"Aligning subtitles: window {p.WindowIndex}/{p.WindowCount}, " +
+                               $"{p.LinesAligned}/{p.LinesTotal} lines";
+                // The transcription itself owns 0-90; alignment fills the rest.
+                ProgressValue = 90 + (p.Percent / 10.0);
+            }));
+
+            var result = await forcedAligner.AlignAsync(lines, alignProgress, cancellationToken);
 
             // Only paragraphs the aligner actually placed are updated; the rest keep the
             // interpolated times, which beats leaving them at zero.
@@ -2222,8 +2242,14 @@ public partial class SpeechToTextViewModel : ObservableObject
 
         if (!string.IsNullOrEmpty(languageCode))
         {
-            var match = options.FirstOrDefault(x =>
-                x.Option.Choice.StartsWith("wav2vec2-aligner-" + languageCode, StringComparison.OrdinalIgnoreCase));
+            // Several aligners can serve one language ("wav2vec2-aligner-ja" and
+            // "wav2vec2-aligner-ja-ivydata"). The longer choice is the more specific one,
+            // added because it measured better than the generic entry, so prefer it -
+            // taking the first match instead silently kept using the one it replaced.
+            var match = options
+                .Where(x => x.Option.Choice.StartsWith("wav2vec2-aligner-" + languageCode, StringComparison.OrdinalIgnoreCase))
+                .OrderByDescending(x => x.Option.Choice.Length)
+                .FirstOrDefault();
             if (match.Path != null)
             {
                 return match.Path;
