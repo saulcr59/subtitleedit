@@ -2138,10 +2138,23 @@ public partial class SpeechToTextViewModel : ObservableObject
             // hung, and the obvious reaction is to cancel a run that was working.
             var alignProgress = new Progress<ForcedAligner.Progress>(p => Dispatcher.UIThread.Post(() =>
             {
-                ProgressText = $"Aligning subtitles: window {p.WindowIndex}/{p.WindowCount}, " +
-                               $"{p.LinesAligned}/{p.LinesTotal} lines";
+                // Deliberately not showing the window counter. Its denominator is an
+                // estimate the first pass revises upwards as it goes, and the second pass
+                // reuses the same fields for refine batches, restarting the numbering - so
+                // it reads as though the run keeps losing its place. Lines aligned only
+                // grows, and the percentage already covers both passes.
+                ProgressText = $"Aligning subtitles: {p.LinesAligned}/{p.LinesTotal} lines ({p.Percent:F0}%)";
+
                 // The transcription itself owns 0-90; alignment fills the rest.
                 ProgressValue = 90 + (p.Percent / 10.0);
+
+                // Otherwise the elapsed clock, which only ticks on streamed segments,
+                // stays frozen at whatever it read when the upload finished.
+                if (_startTicks > 0)
+                {
+                    var durationMs = (DateTime.UtcNow.Ticks - _startTicks) / 10_000;
+                    ElapsedText = $"Time elapsed: {new TimeCode(durationMs).ToShortDisplayString()}";
+                }
             }));
 
             var result = await forcedAligner.AlignAsync(lines, alignProgress, cancellationToken);
