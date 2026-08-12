@@ -110,6 +110,21 @@ public static class ForcedAlignPlanner
         /// </para>
         /// </summary>
         public bool TrustMeasuredDurations { get; init; }
+
+        /// <summary>
+        /// How much longer a cue may stay on screen once the speech has stopped, when
+        /// nothing else needs the space.
+        /// <para>
+        /// Timing a cue to the sound alone makes it disappear the instant the speaker
+        /// stops, which reads as flicker on short lines - a two-second cue is gone before
+        /// the eye has settled on it. Any of this that would run into the next cue, or past
+        /// the maximum display duration, is given up.
+        /// </para>
+        /// <para>
+        /// Zero by default, which keeps cues ending exactly where the speech does.
+        /// </para>
+        /// </summary>
+        public double LingerSeconds { get; init; }
     }
 
     /// <summary>

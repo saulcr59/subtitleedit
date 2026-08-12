@@ -301,7 +301,9 @@ public sealed class ForcedAligner
 
         aligned = await RefineAsync(aligned, texts, readingCps, estimated, progress, cancellationToken).ConfigureAwait(false);
 
-        ApplyTimeCodes(lines, aligned, texts, alignable, _audio.TotalSeconds, _options.TrustMeasuredDurations);
+        ApplyTimeCodes(
+            lines, aligned, texts, alignable, _audio.TotalSeconds,
+            _options.TrustMeasuredDurations, _options.LingerSeconds);
         return new Result(allTexts.Count, aligned.Count);
     }
 
@@ -519,7 +521,8 @@ public sealed class ForcedAligner
         IReadOnlyList<string> texts,
         IReadOnlyList<int> alignable,
         double audioSeconds,
-        bool trustMeasuredDurations = false)
+        bool trustMeasuredDurations = false,
+        double lingerSeconds = 0.0)
     {
         var minGapMs = Se.Settings.General.MinimumBetweenLines.GetMilliseconds();
         var minDurationMs = (double)Se.Settings.General.SubtitleMinimumDisplayMilliseconds;
@@ -554,6 +557,17 @@ public sealed class ForcedAligner
                 ? (spokenMs > 0 ? spokenMs : readingMs)
                 : Math.Min(spokenMs > 0 ? spokenMs : readingMs, readingMs);
             durationMs = Math.Clamp(durationMs, minDurationMs, maxDurationMs > 0 ? maxDurationMs : durationMs);
+
+            // Hold the cue past the end of the sound when nothing else needs the space.
+            // Ending exactly where the speech stops reads as flicker on short lines.
+            if (lingerSeconds > 0)
+            {
+                durationMs += lingerSeconds * 1000.0;
+                if (maxDurationMs > 0)
+                {
+                    durationMs = Math.Min(durationMs, maxDurationMs);
+                }
+            }
 
             // Never run into the next line's speech.
             if (i + 1 < aligned.Count)
