@@ -123,6 +123,29 @@ public class ForcedAlignerLiveRepro
             // one window at a time - so assert on the windows it took instead.
             Assert.True(windowsUsed <= 2,
                 $"took {windowsUsed} windows for {lines.Count} lines; cues are being rejected one per window");
+
+            // Silero puts the second line's speech at 9.218-11.710 s. Aligning one line per
+            // window made each line restart from wherever the last one ended, and the error
+            // compounded: this line came out at 11.783 s, after the phrase had finished.
+            var second = lines[1].StartTime.TotalSeconds;
+            Assert.True(second is > 8.5 and < 10.0,
+                $"second line starts at {second:F3}s; its speech runs 9.218-11.710s");
+
+            // Durations are recomputed from reading time but then clipped so a line cannot
+            // outlast the next line's start. Lines crowded together therefore come out
+            // flashing past - the run that misplaced its cues produced several under 0.5 s.
+            for (var i = 0; i < lines.Count; i++)
+            {
+                var seconds = lines[i].EndTime.TotalSeconds - lines[i].StartTime.TotalSeconds;
+                Assert.True(seconds >= 0.5,
+                    $"line {i + 1} is on screen for {seconds:F3}s: \"{lines[i].Text}\"");
+            }
+
+            for (var i = 1; i < lines.Count; i++)
+            {
+                Assert.True(lines[i].StartTime >= lines[i - 1].StartTime,
+                    $"line {i + 1} starts before line {i}");
+            }
         }
         finally
         {
