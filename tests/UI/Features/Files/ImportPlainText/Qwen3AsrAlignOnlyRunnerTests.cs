@@ -132,6 +132,44 @@ public class Qwen3AsrAlignOnlyRunnerTests
     }
 
     [Fact]
+    public void ALineWhoseLastCharacterSwallowedThePauseAfterItEndsAtTheSound()
+    {
+        // The pause after a line is absorbed by its final character, which made the cue
+        // look far longer than its text takes to read - the exact signal AcceptChunk uses
+        // to decide the aligner has lost track, so nearly every cue was rejected.
+        var claimed = new[] { (1.00, 1.14), (1.14, 1.28), (1.28, 9.50) };
+
+        var span = Qwen3AsrAlignOnlyRunner.SpanOf(claimed);
+
+        Assert.Equal(1.00, span.Start, 3);
+        Assert.True(span.End < 2.0, $"line ends at {span.End:F3}s, out in the silence after it");
+        Assert.True(span.End >= 1.28, "the end must not move before the last character starts");
+    }
+
+    [Fact]
+    public void TrimsBothEndsWhenBothSwallowedSilence()
+    {
+        var claimed = new[] { (0.16, 7.69), (7.69, 7.83), (7.83, 15.00) };
+
+        var span = Qwen3AsrAlignOnlyRunner.SpanOf(claimed);
+
+        Assert.True(span.Start > 7.0, $"starts at {span.Start:F3}s");
+        Assert.True(span.End < 8.5, $"ends at {span.End:F3}s");
+        Assert.True(span.End > span.Start, "the span must stay positive");
+    }
+
+    [Fact]
+    public void AnOrdinaryLineKeepsBothItsTimes()
+    {
+        var claimed = new[] { (1.00, 1.14), (1.14, 1.26), (1.26, 1.40) };
+
+        var span = Qwen3AsrAlignOnlyRunner.SpanOf(claimed);
+
+        Assert.Equal(1.00, span.Start, 3);
+        Assert.Equal(1.40, span.End, 3);
+    }
+
+    [Fact]
     public void ParsesTheClisJsonShape()
     {
         // Exactly what qwen3-asr-cli -o writes, trailing newline included.

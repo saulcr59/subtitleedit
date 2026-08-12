@@ -85,9 +85,19 @@ public class ForcedAlignerLiveRepro
 
             using var audio = new FfmpegWindowAudioSource(FfmpegPath(), wav, 60.0, work);
             var runner = new Qwen3AsrAlignOnlyRunner(Engine, Model, m => Console.WriteLine("[cli] " + m));
-            var aligner = new ForcedAligner(runner, audio);
 
-            var result = await aligner.AlignAsync(lines, null, TestContext.Current.CancellationToken);
+            // Same settings the speech-to-text path uses, so this exercises what ships
+            // rather than the library defaults.
+            var aligner = new ForcedAligner(runner, audio, new ForcedAlignPlanner.Options
+            {
+                WindowSeconds = 45,
+                MaxDurationSlackSeconds = 2.0,
+            });
+
+            var windowsUsed = 0;
+            var progress = new Progress<ForcedAligner.Progress>(p => windowsUsed = Math.Max(windowsUsed, p.WindowIndex));
+
+            var result = await aligner.AlignAsync(lines, progress, TestContext.Current.CancellationToken);
 
             Console.WriteLine($"aligned {result.AlignedLines}/{result.TotalLines}");
             foreach (var line in lines.Take(4))
@@ -102,6 +112,17 @@ public class ForcedAlignerLiveRepro
             var first = lines[0].StartTime.TotalSeconds;
             Assert.True(first is > 6.5 and < 8.3,
                 $"first line starts at {first:F3}s; speech runs 7.810-8.670s");
+
+            Assert.True(result.AlignedLines >= lines.Count - 1,
+                $"only {result.AlignedLines}/{result.TotalLines} lines were accepted");
+
+            // The real symptom of untrimmed cue ends: a cue reaching out into the silence
+            // after it looks far longer than its text takes to read, which AcceptChunk
+            // treats as the aligner having lost track, so it believed exactly one cue per
+            // window. Lines accepted cannot show that - they were all accepted either way,
+            // one window at a time - so assert on the windows it took instead.
+            Assert.True(windowsUsed <= 2,
+                $"took {windowsUsed} windows for {lines.Count} lines; cues are being rejected one per window");
         }
         finally
         {

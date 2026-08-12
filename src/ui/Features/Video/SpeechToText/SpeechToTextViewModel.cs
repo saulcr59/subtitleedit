@@ -2122,7 +2122,15 @@ public partial class SpeechToTextViewModel : ObservableObject
             // the aligner roughly three times its chunk's text in slack, which is what lets
             // it skip audio the script does not cover, and stays well above the 15 s the
             // cursor creeps when a window matches nothing.
-            var options = new ForcedAlignPlanner.Options { WindowSeconds = 45 };
+            // The 2 s slack is what stops short lines being mistaken for runaway cues.
+            // Measured on this material: line durations ran 1.3x to 6.0x their reading
+            // time, worst on the shortest lines, so the pure ratio rejected four cues in
+            // seven and the aligner was restarted on a fresh window for nearly every line.
+            var options = new ForcedAlignPlanner.Options
+            {
+                WindowSeconds = 45,
+                MaxDurationSlackSeconds = 2.0,
+            };
             var forcedAligner = new ForcedAligner(runner, audio, options);
 
             // Alignment reloads the acoustic model for every window, so a long video takes

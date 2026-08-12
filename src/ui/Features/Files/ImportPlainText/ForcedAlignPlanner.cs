@@ -76,6 +76,23 @@ public static class ForcedAlignPlanner
         /// most-of-a-window sails straight past it and never re-syncs.
         /// </summary>
         public double SkipSeconds { get; init; } = 15.0;
+
+        /// <summary>
+        /// Absolute allowance added to the reading-time limit a cue may exceed before
+        /// <see cref="AcceptChunk"/> stops believing the chunk.
+        /// <para>
+        /// Reading time is text length over the configured display speed, which models no
+        /// fixed cost at all, while speech has plenty - pauses, breath, emphasis. A ratio
+        /// alone therefore punishes short lines hardest: measured on Japanese speech at the
+        /// default 15 chars/second display setting, a seven-character line read in 0.47 s
+        /// takes 2.80 s to say, a ratio of 6.0, while long lines sat near 1.9. Four cues in
+        /// seven were rejected as runaways for no better reason than being short.
+        /// </para>
+        /// <para>
+        /// Zero by default, which keeps the pure-ratio behaviour for existing callers.
+        /// </para>
+        /// </summary>
+        public double MaxDurationSlackSeconds { get; init; }
     }
 
     /// <summary>
@@ -134,7 +151,8 @@ public static class ForcedAlignPlanner
         IReadOnlyList<Cue> cues,
         IReadOnlyList<double> readingSeconds,
         double maxGapSeconds = 12.0,
-        double maxDurationRatio = 2.5)
+        double maxDurationRatio = 2.5,
+        double maxDurationSlackSeconds = 0.0)
     {
         ArgumentNullException.ThrowIfNull(cues);
         ArgumentNullException.ThrowIfNull(readingSeconds);
@@ -152,7 +170,7 @@ public static class ForcedAlignPlanner
             if (i > 0 && readingSeconds[i] > 0)
             {
                 var duration = cues[i].EndSeconds - cues[i].StartSeconds;
-                if (duration > readingSeconds[i] * maxDurationRatio)
+                if (duration > readingSeconds[i] * maxDurationRatio + maxDurationSlackSeconds)
                 {
                     break;
                 }

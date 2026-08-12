@@ -130,7 +130,8 @@ public sealed class ForcedAligner
             }
 
             var readingSeconds = fed.Select(t => t.Length / readingCps).ToList();
-            var accept = ForcedAlignPlanner.AcceptChunk(cues, readingSeconds);
+            var accept = ForcedAlignPlanner.AcceptChunk(
+                cues, readingSeconds, maxDurationSlackSeconds: _options.MaxDurationSlackSeconds);
 
             // The last cue accepted has no following word to stop at, so its end runs on;
             // leave that line for the next chunk unless this chunk holds the rest of the

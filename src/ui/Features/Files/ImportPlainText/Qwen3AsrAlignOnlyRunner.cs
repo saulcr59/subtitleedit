@@ -177,7 +177,13 @@ public sealed class Qwen3AsrAlignOnlyRunner : ForcedAligner.IRunner
                 wordIndex++;
             }
 
-            double? start = claimed.Count > 0 ? OnsetOf(claimed) : null;
+            double? start = null;
+            if (claimed.Count > 0)
+            {
+                var span = SpanOf(claimed);
+                start = span.Start;
+                end = span.End;
+            }
 
             // A line with no tokens left to claim still needs a cue: ParseCues maps
             // cues onto lines by position, so skipping one would shift every line
@@ -210,31 +216,69 @@ public sealed class Qwen3AsrAlignOnlyRunner : ForcedAligner.IRunner
     /// </para>
     /// </summary>
     internal static double OnsetOf(IReadOnlyList<(double Start, double End)> claimed)
+        => SpanOf(claimed).Start;
+
+    /// <summary>
+    /// The span of sound a line occupies, with silence swallowed at either end removed.
+    /// <para>
+    /// Trailing silence matters as much as leading: a line's last character absorbs the
+    /// pause after it, which makes the cue look far longer than its text takes to read.
+    /// <see cref="ForcedAlignPlanner.AcceptChunk"/> treats exactly that as the signal that
+    /// the aligner has stopped tracking and is filling space, so untrimmed ends made it
+    /// reject nearly every cue - one line was accepted per window, and a run that should
+    /// take a handful of windows needed one per line.
+    /// </para>
+    /// <para>
+    /// Nothing is lost by trimming: the caller recomputes durations from reading time
+    /// anyway, and only the start survives to the subtitle.
+    /// </para>
+    /// </summary>
+    internal static (double Start, double End) SpanOf(IReadOnlyList<(double Start, double End)> claimed)
     {
         var first = claimed[0];
+        var last = claimed[claimed.Count - 1];
         if (claimed.Count < 2)
         {
-            return first.Start;
+            return (first.Start, last.End);
         }
 
-        var others = claimed.Skip(1).Select(c => c.End - c.Start).Where(d => d > 0).OrderBy(d => d).ToList();
-        if (others.Count == 0)
+        // Measure "typical" from the characters that cannot have absorbed an outside
+        // pause - the interior ones. With only two characters there is no interior, so
+        // fall back to whichever is shorter, the one less likely to have swallowed a gap.
+        List<double> sample;
+        if (claimed.Count > 2)
         {
-            return first.Start;
+            sample = claimed.Skip(1).Take(claimed.Count - 2).Select(c => c.End - c.Start).ToList();
+        }
+        else
+        {
+            sample = new List<double> { Math.Min(first.End - first.Start, last.End - last.Start) };
         }
 
-        var typical = others[others.Count / 2];
-        var firstDuration = first.End - first.Start;
+        sample = sample.Where(d => d > 0).OrderBy(d => d).ToList();
+        if (sample.Count == 0)
+        {
+            return (first.Start, last.End);
+        }
+
+        var typical = sample[sample.Count / 2];
 
         // Both guards matter: the ratio catches a swallowed pause at any speaking rate,
         // and the absolute floor stops a merely slightly-long character from being trimmed
         // when the typical length is tiny.
-        if (firstDuration > typical * 3 && firstDuration > 0.4)
+        var start = first.Start;
+        if (first.End - first.Start > typical * 3 && first.End - first.Start > 0.4)
         {
-            return Math.Max(first.Start, first.End - typical);
+            start = Math.Max(first.Start, first.End - typical);
         }
 
-        return first.Start;
+        var end = last.End;
+        if (last.End - last.Start > typical * 3 && last.End - last.Start > 0.4)
+        {
+            end = Math.Min(last.End, last.Start + typical);
+        }
+
+        return (start, Math.Max(end, start));
     }
 
     private static int CountVisible(string s)
