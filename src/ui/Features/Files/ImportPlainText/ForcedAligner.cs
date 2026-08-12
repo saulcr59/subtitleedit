@@ -301,7 +301,7 @@ public sealed class ForcedAligner
 
         aligned = await RefineAsync(aligned, texts, readingCps, estimated, progress, cancellationToken).ConfigureAwait(false);
 
-        ApplyTimeCodes(lines, aligned, texts, alignable, _audio.TotalSeconds);
+        ApplyTimeCodes(lines, aligned, texts, alignable, _audio.TotalSeconds, _options.TrustMeasuredDurations);
         return new Result(allTexts.Count, aligned.Count);
     }
 
@@ -518,7 +518,8 @@ public sealed class ForcedAligner
         List<(double Start, double End)> aligned,
         IReadOnlyList<string> texts,
         IReadOnlyList<int> alignable,
-        double audioSeconds)
+        double audioSeconds,
+        bool trustMeasuredDurations = false)
     {
         var minGapMs = Se.Settings.General.MinimumBetweenLines.GetMilliseconds();
         var minDurationMs = (double)Se.Settings.General.SubtitleMinimumDisplayMilliseconds;
@@ -545,8 +546,13 @@ public sealed class ForcedAligner
                 : minDurationMs;
 
             // Whichever is shorter: how long the line actually took, or how long it takes
-            // to read. A cue must never outlast the silence the aligner stretched it over.
-            var durationMs = Math.Min(spokenMs > 0 ? spokenMs : readingMs, readingMs);
+            // to read. A cue must never outlast the silence the aligner stretched it over -
+            // unless the runner already trimmed that silence off, in which case the
+            // measured length is the better answer and capping it at reading time cuts the
+            // cue off mid-sentence.
+            var durationMs = trustMeasuredDurations
+                ? (spokenMs > 0 ? spokenMs : readingMs)
+                : Math.Min(spokenMs > 0 ? spokenMs : readingMs, readingMs);
             durationMs = Math.Clamp(durationMs, minDurationMs, maxDurationMs > 0 ? maxDurationMs : durationMs);
 
             // Never run into the next line's speech.

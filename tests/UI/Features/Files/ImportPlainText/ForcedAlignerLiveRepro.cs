@@ -92,6 +92,7 @@ public class ForcedAlignerLiveRepro
             {
                 WindowSeconds = 45,
                 MaxDurationSlackSeconds = 2.0,
+                TrustMeasuredDurations = true,
             });
 
             var windowsUsed = 0;
@@ -140,6 +141,13 @@ public class ForcedAlignerLiveRepro
                 Assert.True(seconds >= 0.5,
                     $"line {i + 1} is on screen for {seconds:F3}s: \"{lines[i].Text}\"");
             }
+
+            // Speech is slower than reading, so capping duration at reading time pinned
+            // almost every cue to the one-second minimum and made it vanish mid-sentence.
+            // These lines take 1.1-3.6 s to say, so several must outlast that minimum.
+            var overMinimum = lines.Count(l => (l.EndTime - l.StartTime).TotalSeconds > 1.5);
+            Assert.True(overMinimum >= 3,
+                $"only {overMinimum} of {lines.Count} cues last longer than 1.5s; durations are still capped at reading time");
 
             for (var i = 1; i < lines.Count; i++)
             {

@@ -93,6 +93,23 @@ public static class ForcedAlignPlanner
         /// </para>
         /// </summary>
         public double MaxDurationSlackSeconds { get; init; }
+
+        /// <summary>
+        /// Whether a cue may stay on screen for as long as its line was actually spoken,
+        /// rather than being capped at how long the text takes to read.
+        /// <para>
+        /// The cap exists because a forced aligner stretches a cue over the silence that
+        /// follows it, so its measured length says more about the pause than the speech.
+        /// A runner that trims that silence off has no such problem, and the cap then does
+        /// active harm: speech is slower than reading, so on Japanese at the default 15
+        /// characters/second nearly every cue was cut to the minimum display time and
+        /// vanished while the speaker was still mid-sentence.
+        /// </para>
+        /// <para>
+        /// False by default, for runners whose ends still carry the following silence.
+        /// </para>
+        /// </summary>
+        public bool TrustMeasuredDurations { get; init; }
     }
 
     /// <summary>

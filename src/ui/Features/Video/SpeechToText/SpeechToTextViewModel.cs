@@ -2130,6 +2130,10 @@ public partial class SpeechToTextViewModel : ObservableObject
             {
                 WindowSeconds = 45,
                 MaxDurationSlackSeconds = 2.0,
+
+                // This runner trims the silence off both ends of a cue, so its measured
+                // length is speech rather than pause and beats capping at reading time.
+                TrustMeasuredDurations = true,
             };
             var forcedAligner = new ForcedAligner(runner, audio, options);
 
